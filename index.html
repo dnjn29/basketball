@@ -20,6 +20,7 @@
     box-shadow: 0 10px 40px rgba(0,0,0,.5);
     touch-action: none;
     max-width: 100%; max-height: 100%;
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   }
 </style>
 </head>
@@ -31,7 +32,8 @@
 
   const canvas = document.getElementById("c");
   const ctx = canvas.getContext("2d");
-  const W = canvas.width, H = canvas.height;
+  let W = canvas.width;
+  const H = canvas.height;              // 세로는 고정 — 코트 투시가 이 값에 맞춰져 있다
 
   // ===== 코트 (FIBA 하프코트, 단위 m) =====
   // x: 좌우(0 = 중앙),  z: 베이스라인에서의 거리,  y: 높이
@@ -45,8 +47,20 @@
 
   // ===== 카메라 (하프코트 전체가 들어오는 방송 중계 앵글) =====
   // 베이스라인(z=0)이 화면 y=250·반폭 330px, 코트 앞단(z=10)이 y=600·반폭 580px 이 되도록 역산
-  const CAM_Z = 23.2, CAM_Y = 10.5, FOCAL = 1020.8, HORIZON = -212, CX = W / 2;
+  const CAM_Z = 23.2, CAM_Y = 10.5, FOCAL = 1020.8, HORIZON = -212;
+  let CX = W / 2;
   const PANEL_Y = 655;
+
+  // 화면 비율에 맞춰 캔버스 가로를 늘린다 (폰 가로모드에서 꽉 차게)
+  function fitCanvas() {
+    const aspect = (window.innerWidth || W) / (window.innerHeight || H);
+    W = Math.round(Math.max(1200, Math.min(1900, H * aspect)));
+    canvas.width = W;
+    canvas.height = H;
+    CX = W / 2;
+  }
+  window.addEventListener("resize", fitCanvas);
+  window.addEventListener("orientationchange", () => setTimeout(fitCanvas, 120));
 
   function proj(x, y, z) {
     const s = FOCAL / (CAM_Z - z);
@@ -221,18 +235,28 @@
   const isSpace = (e) => e.code === "Space" || e.key === " ";
   const busy = () => ball.live || charging || dunk.active;
 
+  // 키보드와 터치가 같은 함수를 쓴다
+  function pressShoot() {
+    if (gameOver) { reset(); return; }
+    if (busy()) return;
+    if (inDunkRange()) { launch(null); return; }   // 덩크는 누르는 즉시
+    if (!gauge) return;
+    charging = true; power = 0; powerDir = 1;
+  }
+  function releaseShoot() {
+    if (!charging) return;
+    charging = false;
+    if (power < 4) return;
+    launch(power);
+  }
+
   window.addEventListener("keydown", (e) => {
     const mk = keyOf(e);
     if (mk) { e.preventDefault(); if (!busy() && !gameOver) keys[mk] = true; return; }
     if (!isSpace(e)) return;
     e.preventDefault();
     if (e.repeat) return;
-    if (gameOver) { reset(); return; }
-    if (busy()) return;
-
-    if (inDunkRange()) { launch(null); return; }   // 덩크는 누르는 즉시
-    if (!gauge) return;
-    charging = true; power = 0; powerDir = 1;
+    pressShoot();
   });
 
   window.addEventListener("keyup", (e) => {
@@ -240,13 +264,58 @@
     if (mk) { keys[mk] = false; return; }
     if (!isSpace(e)) return;
     e.preventDefault();
-    if (!charging) return;
-    charging = false;
-    if (power < 4) return;
-    launch(power);
+    releaseShoot();
   });
 
-  canvas.addEventListener("pointerdown", () => { if (gameOver) reset(); });
+  // ===== 터치 조작 (왼쪽 조이스틱 / 오른쪽 슛 버튼) =====
+  let touchUI = false;
+  const JOY_MAX = 110;
+  const joy = { id: null, ox: 0, oy: 0, x: 0, z: 0, active: false };
+  let shootId = null;
+
+  const joyHome = () => ({ x: 185, y: H - 120 });
+  const shootHome = () => ({ x: W - 175, y: H - 120 });
+
+  function canvasPt(e) {
+    const r = canvas.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * (W / r.width),
+             y: (e.clientY - r.top) * (H / r.height) };
+  }
+
+  canvas.addEventListener("pointerdown", (e) => {
+    touchUI = true;            // 한 번이라도 화면을 누르면 조작 UI를 띄운다
+    e.preventDefault();
+    const p = canvasPt(e);
+
+    if (gameOver) { reset(); return; }
+
+    if (p.x > W / 2) {                       // 오른쪽 절반 = 슛 / 덩크
+      if (shootId === null) { shootId = e.pointerId; pressShoot(); }
+    } else if (joy.id === null) {            // 왼쪽 절반 = 이동
+      joy.id = e.pointerId; joy.ox = p.x; joy.oy = p.y;
+      joy.x = 0; joy.z = 0; joy.active = true;
+    }
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* 무시 */ }
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (e.pointerId !== joy.id) return;
+    const p = canvasPt(e);
+    let dx = p.x - joy.ox, dy = p.y - joy.oy;
+    const len = Math.hypot(dx, dy);
+    if (len > JOY_MAX) { dx = dx / len * JOY_MAX; dy = dy / len * JOY_MAX; }
+    if (len < 16) { dx = 0; dy = 0; }
+    joy.x = dx / JOY_MAX;                    // 화면 오른쪽 = +x
+    joy.z = dy / JOY_MAX;                    // 화면 아래 = z 증가(림에서 멀어짐)
+  });
+
+  function endPointer(e) {
+    if (e.pointerId === joy.id) { joy.id = null; joy.active = false; joy.x = 0; joy.z = 0; }
+    if (e.pointerId === shootId) { shootId = null; releaseShoot(); }
+  }
+  canvas.addEventListener("pointerup", endPointer);
+  canvas.addEventListener("pointercancel", endPointer);
+  canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 
   // ===== 발사 =====
   function launch(p) {
@@ -359,15 +428,18 @@
   function step() {
     moving = false;
     if (!busy() && !gameOver) {
-      let mx = (keys.R ? 1 : 0) - (keys.L ? 1 : 0);
-      let mz = (keys.D ? 1 : 0) - (keys.U ? 1 : 0);   // 위 = 림 쪽 = z 감소
-      if (mx || mz) {
-        const n = Math.hypot(mx, mz) || 1;
-        player.x = Math.max(PLAYER_MIN_X, Math.min(PLAYER_MAX_X, player.x + mx / n * MOVE_SPEED));
-        player.z = Math.max(PLAYER_MIN_Z, Math.min(PLAYER_MAX_Z, player.z + mz / n * MOVE_SPEED));
+      // 조이스틱이 잡혀 있으면 그쪽이 우선 (기울인 만큼 속도도 비례)
+      let mx = joy.active ? joy.x : (keys.R ? 1 : 0) - (keys.L ? 1 : 0);
+      let mz = joy.active ? joy.z : (keys.D ? 1 : 0) - (keys.U ? 1 : 0);
+      const mag = Math.hypot(mx, mz);
+      if (mag > 0.02) {
+        const sp = MOVE_SPEED * Math.min(1, mag);
+        const ux = mx / mag, uz = mz / mag;
+        player.x = Math.max(PLAYER_MIN_X, Math.min(PLAYER_MAX_X, player.x + ux * sp));
+        player.z = Math.max(PLAYER_MIN_Z, Math.min(PLAYER_MAX_Z, player.z + uz * sp));
         bandDirty = true;
         moving = true;
-        if (mx) dribSide = mx > 0 ? 1 : -1;           // 오른쪽=오른손, 왼쪽=왼손
+        if (Math.abs(ux) > 0.25) dribSide = ux > 0 ? 1 : -1;   // 오른쪽=오른손, 왼쪽=왼손
       }
     }
     if (bandDirty && !keys.L && !keys.R && !keys.U && !keys.D && !dunk.active) refreshBand();
@@ -783,6 +855,60 @@
     };
   }
 
+  // ---- 터치 조작 UI ----
+  function drawTouchUI() {
+    if (!touchUI) return;
+
+    // 왼쪽 조이스틱
+    const base = joy.active ? { x: joy.ox, y: joy.oy } : joyHome();
+    ctx.strokeStyle = "rgba(255,255,255,.22)";
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(base.x, base.y, JOY_MAX, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,.07)";
+    ctx.fill();
+
+    const kx = base.x + joy.x * JOY_MAX, ky = base.y + joy.z * JOY_MAX;
+    ctx.fillStyle = joy.active ? "rgba(255,255,255,.55)" : "rgba(255,255,255,.3)";
+    ctx.beginPath(); ctx.arc(kx, ky, 44, 0, Math.PI * 2); ctx.fill();
+
+    if (!joy.active) {
+      ctx.fillStyle = "rgba(255,255,255,.4)";
+      ctx.font = "16px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("이동", base.x, base.y + JOY_MAX + 28);
+      ctx.textAlign = "left";
+    }
+
+    // 오른쪽 슛 / 덩크 버튼
+    const s = shootHome();
+    const dunkMode = inDunkRange();
+    const held = shootId !== null;
+    ctx.fillStyle = dunkMode ? "rgba(243,197,66,.26)" : "rgba(74,222,128,.22)";
+    if (held) ctx.fillStyle = dunkMode ? "rgba(243,197,66,.5)" : "rgba(74,222,128,.45)";
+    ctx.beginPath(); ctx.arc(s.x, s.y, 92, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = dunkMode ? "rgba(243,197,66,.8)" : "rgba(74,222,128,.7)";
+    ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(s.x, s.y, 92, 0, Math.PI * 2); ctx.stroke();
+
+    ctx.fillStyle = "#e9ecf1";
+    ctx.font = "bold 26px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(dunkMode ? "덩크" : "슛", s.x, s.y + 9);
+    ctx.textAlign = "left";
+  }
+
+  function drawRotateNotice() {
+    if (!touchUI || window.innerHeight <= window.innerWidth) return;
+    ctx.fillStyle = "rgba(8,10,14,.93)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#e9ecf1";
+    ctx.font = "bold 44px sans-serif";
+    ctx.fillText("📱  가로로 돌려주세요", W / 2, H / 2 - 10);
+    ctx.fillStyle = "rgba(255,255,255,.6)";
+    ctx.font = "22px sans-serif";
+    ctx.fillText("가로 화면에서 플레이할 수 있습니다", W / 2, H / 2 + 40);
+    ctx.textAlign = "left";
+  }
+
   function draw() {
     drawCourt();
     // 림보다 뒤(= z가 작은 쪽)면 선수를 먼저, 아니면 골대를 먼저 그린다
@@ -794,7 +920,9 @@
     ctx.fillRect(0, PANEL_Y, W, H - PANEL_Y);
     drawGauge();
     drawHUD();
+    drawTouchUI();
     if (gameOver) drawGameOver();
+    drawRotateNotice();
   }
 
   let acc = 0, last = 0;
@@ -807,6 +935,7 @@
     requestAnimationFrame(loop);
   }
 
+  fitCanvas();
   newBall();
   refreshBand();
   requestAnimationFrame(loop);
