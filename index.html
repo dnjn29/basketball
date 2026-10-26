@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>농구 슛 게임</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%;
+    background: #0f1115;
+    color: #e9ecf1;
+    font-family: "Segoe UI", "Malgun Gothic", system-ui, sans-serif;
+    overflow: hidden;
+  }
+  #wrap { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  canvas {
+    background: #11141a;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.5);
+    touch-action: none;
+    max-width: 100%; max-height: 100%;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c" width="1200" height="750"></canvas></div>
+<script>
+(function () {
+  "use strict";
+
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+
+  // ===== 코트 (FIBA 하프코트, 단위 m) =====
+  // x: 좌우(0 = 중앙),  z: 베이스라인에서의 거리,  y: 높이
+  const COURT_W = 15, COURT_L = 10;      // 3점 라인이 모두 들어오는 득점 지역
+  const HOOP_Z = 1.575, RIM_H = 3.05, RIM_R = 0.225, TUBE_R = 0.02;
+  const BOARD_Z = 1.2, BOARD_W = 1.8, BOARD_BOT = 2.9, BOARD_TOP = 3.95;
+  const SQ_W = 0.59, SQ_H = 0.45;
+  const THREE_R = 6.75, CORNER_X = 6.6;
+  const KEY_W = 4.9, FT_Z = 5.8, FT_R = 1.8, RESTRICT_R = 1.25;
+  const BALL_R = 0.1195;
+
+  // ===== 카메라 (하프코트 전체가 들어오는 방송 중계 앵글) =====
+  // 베이스라인(z=0)이 화면 y=250·반폭 330px, 코트 앞단(z=10)이 y=600·반폭 580px 이 되도록 역산
+  const CAM_Z = 23.2, CAM_Y = 10.5, FOCAL = 1020.8, HORIZON = -212, CX = W / 2;
+  const PANEL_Y = 655;
+
+  function proj(x, y, z) {
+    const s = FOCAL / (CAM_Z - z);
+    return { x: CX + s * x, y: HORIZON + s * (CAM_Y - y), s: s };
+  }
+
+  // ===== 선수 =====
+  const RELEASE_H = 2.5;                 // 점프슛 릴리스 높이
+  const REACH = 2.30;                    // 스탠딩 리치
+  const PLAYER_MIN_X = -7, PLAYER_MAX_X = 7;
+  const PLAYER_MIN_Z = 0.5, PLAYER_MAX_Z = 9.5;
+  const MOVE_SPEED = 4.2 / 60;           // 초당 4.2m
+  const DUNK_RANGE = 1.7;
+  const DUNK_SPOT = { x: 0, z: HOOP_Z + RIM_R };   // 림 앞쪽 가장자리 바로 아래
+  const GRAB_H = RIM_H - REACH;          // 림을 잡으려면 필요한 점프 높이
+
+  // ===== 물리 =====
+  const FPS = 60, STEP_MS = 1000 / FPS;
+  const G = 9.8 / (FPS * FPS);           // m/frame²
+  const AIR = 0.999;
+  const BOUNCE = 0.55, RIM_BOUNCE = 0.62;
+  const SHOT_ANGLE = 54 * Math.PI / 180;
+  const TOTAL_SHOTS = 10;
+  const SHOT_TIMEOUT = FPS * 7;
+
+  // ===== 게이지 =====
+  const CHARGE_RATE = 170 / FPS;         // 초당 170% — 짧게 눌러도 찬다
+  const BAND_CENTER = 0.55;              // 성공 구간 중심이 놓일 게이지 위치
+  const SPEED_LO = 0.05, SPEED_HI = 0.36; // 탐색 범위 (m/frame)
+
+  // 거리가 멀수록 성공 구간을 살짝 좁힌다 (3점의 가치 유지)
+  const bandFrac = (d) => Math.max(0.17, Math.min(0.34, 0.34 - 0.014 * d));
+
+  const RISE_F = 22, DROP_F = 26, HANG_MAX = 150, HANG_AFTER_SCORE = 26;
+
+  // ===== 상태 =====
+  const player = { x: 0, z: FT_Z };
+  // 공은 "슛 라인 위의 부호 있는 거리 p" + 높이 y 로 움직인다 (방향은 항상 림)
+  const ball = { p: 0, y: 0, vp: 0, vy: 0, dx: 0, dz: 1, rot: 0, live: false, scored: false };
+
+  let shots = 0, score = 0, makes = 0;
+  let shotValue = 2, shotIsDunk = false;
+  let message = "", messageColor = "#ff7a7a", messageTimer = 0;
+  let rimFlash = 0, settleTimer = 0, shotTimer = 0;
+  let gameOver = false;
+
+  let charging = false, power = 0, powerDir = 1, lastPower = null;
+  const keys = { L: false, R: false, U: false, D: false };
+
+  // 드리블 / 팔 자세
+  const DRIB_PERIOD = 26;                // 한 번 튀는 데 걸리는 프레임
+  const DRIB_HAND_H = 0.95;              // 드리블하는 손 높이
+  let armsUp = 0;                        // 0 = 팔 내림, 1 = 슛 자세
+  let dribPhase = 0, dribSide = 1, dribbling = false, moving = false;
+
+  const dunk = { active: false, phase: "rise", t: 0, fromX: 0, fromZ: 0,
+                 x: 0, z: 0, lift: 0, dropFrom: 0, hang: 0, released: false, afterScore: 0 };
+
+  const hoopDist = (x, z) => Math.hypot(x - 0, z - HOOP_Z);
+  const distToRim = () => hoopDist(player.x, player.z);
+  const inDunkRange = () => distToRim() < DUNK_RANGE;
+  // 코너는 직선(6.6m), 그 위는 아크(6.75m) — 코트에 그려진 선과 같은 판정
+  const CORNER_Z = HOOP_Z + THREE_R * Math.cos(Math.asin(CORNER_X / THREE_R));
+  const isThree = () => player.z <= CORNER_Z
+    ? Math.abs(player.x) >= CORNER_X
+    : distToRim() >= THREE_R;
+
+  // ===== 물리: 슛 평면 (p, y) 에서 한 스텝 =====
+  function advance(o) {
+    const prevY = o.y, prevP = o.p;
+
+    o.vy -= G;
+    o.vp *= AIR; o.vy *= AIR;
+    o.p += o.vp;
+    o.y += o.vy;
+    o.rot += 0.06;
+
+    // 득점: 림 높이를 위에서 아래로 통과 + 림 안쪽
+    if (!o.scored && o.vy < 0 && prevY >= RIM_H && o.y < RIM_H && Math.abs(o.p) < RIM_R) {
+      o.scored = true;
+    }
+
+    // 림 링과의 충돌 (링까지의 최단거리로 판정)
+    const sgn = o.p >= 0 ? 1 : -1;
+    const dh = Math.abs(o.p) - RIM_R, dy = o.y - RIM_H;
+    const len = Math.hypot(dh, dy), min = BALL_R + TUBE_R;
+    if (len > 0 && len < min) {
+      const np = sgn * dh / len, ny = dy / len;
+      o.p = sgn * RIM_R + np * min;
+      o.y = RIM_H + ny * min;
+      const dot = o.vp * np + o.vy * ny;
+      o.vp = (o.vp - 2 * dot * np) * RIM_BOUNCE;
+      o.vy = (o.vy - 2 * dot * ny) * RIM_BOUNCE;
+    }
+
+    // 백보드 앞면 (림 중심에서 뒤로 0.375m)
+    const boardP = -(HOOP_Z - BOARD_Z);
+    if (o.y > BOARD_BOT && o.y < BOARD_TOP &&
+        o.p - BALL_R <= boardP && prevP - BALL_R > boardP) {
+      o.p = boardP + BALL_R;
+      o.vp = Math.abs(o.vp) * BOUNCE;
+    }
+
+    // 바닥
+    if (o.y - BALL_R < 0) {
+      o.y = BALL_R;
+      o.vy = -o.vy * BOUNCE;
+      o.vp *= 0.82;
+      if (Math.abs(o.vy) < 0.02) o.vy = 0;
+    }
+  }
+
+  // ===== 성공 강도 구간 탐색 =====
+  function simulate(speed, D) {
+    const o = { p: D, y: RELEASE_H, vp: -Math.cos(SHOT_ANGLE) * speed,
+                vy: Math.sin(SHOT_ANGLE) * speed, rot: 0, scored: false };
+    for (let f = 0; f < 300; f++) {
+      advance(o);
+      if (o.scored) return true;
+      if (o.y - BALL_R <= 0.001) return false;
+    }
+    return false;
+  }
+
+  function findBand(D) {
+    const STEP = 0.0015;
+    let best = null, cur = null;
+    for (let sp = SPEED_LO; sp <= SPEED_HI; sp += STEP) {
+      if (simulate(sp, D)) {
+        if (cur) cur.hi = sp; else cur = { lo: sp, hi: sp };
+      } else if (cur) {
+        if (!best || cur.hi - cur.lo > best.hi - best.lo) best = cur;
+        cur = null;
+      }
+    }
+    if (cur && (!best || cur.hi - cur.lo > best.hi - best.lo)) best = cur;
+    return best;
+  }
+
+  // 게이지는 매 위치마다 성공 구간이 정해진 자리에 오도록 자동 보정된다
+  let gauge = { lo: 0.1, hi: 0.3, bandLo: 45, bandHi: 65 };
+  let bandDirty = true;
+
+  function refreshBand() {
+    bandDirty = false;
+    if (inDunkRange()) { gauge = null; return; }
+    const D = distToRim();
+    const b = findBand(D);
+    if (!b) { gauge = null; return; }
+    const frac = bandFrac(D);
+    const mid = (b.lo + b.hi) / 2;
+    const span = (b.hi - b.lo) / frac;
+    const lo = mid - span * BAND_CENTER;
+    gauge = {
+      lo: lo, hi: lo + span,
+      bandLo: (b.lo - lo) / span * 100,
+      bandHi: (b.hi - lo) / span * 100
+    };
+  }
+
+  const speedOf = (p) => gauge.lo + (gauge.hi - gauge.lo) * (p / 100);
+
+  // ===== 입력 =====
+  function keyOf(e) {
+    const c = e.code, k = (e.key || "").toLowerCase();
+    if (c === "ArrowLeft" || k === "a") return "L";
+    if (c === "ArrowRight" || k === "d") return "R";
+    if (c === "ArrowUp" || k === "w") return "U";
+    if (c === "ArrowDown" || k === "s") return "D";
+    return null;
+  }
+  const isSpace = (e) => e.code === "Space" || e.key === " ";
+  const busy = () => ball.live || charging || dunk.active;
+
+  window.addEventListener("keydown", (e) => {
+    const mk = keyOf(e);
+    if (mk) { e.preventDefault(); if (!busy() && !gameOver) keys[mk] = true; return; }
+    if (!isSpace(e)) return;
+    e.preventDefault();
+    if (e.repeat) return;
+    if (gameOver) { reset(); return; }
+    if (busy()) return;
+
+    if (inDunkRange()) { launch(null); return; }   // 덩크는 누르는 즉시
+    if (!gauge) return;
+    charging = true; power = 0; powerDir = 1;
+  });
+
+  window.addEventListener("keyup", (e) => {
+    const mk = keyOf(e);
+    if (mk) { keys[mk] = false; return; }
+    if (!isSpace(e)) return;
+    e.preventDefault();
+    if (!charging) return;
+    charging = false;
+    if (power < 4) return;
+    launch(power);
+  });
+
+  canvas.addEventListener("pointerdown", () => { if (gameOver) reset(); });
+
+  // ===== 발사 =====
+  function launch(p) {
+    shots++;
+    shotIsDunk = inDunkRange();
+    if (!shotIsDunk) lastPower = p;
+    shotValue = shotIsDunk ? 2 : (isThree() ? 3 : 2);
+
+    if (shotIsDunk) {
+      dunk.active = true; dunk.phase = "rise"; dunk.t = 0;
+      dunk.fromX = player.x; dunk.fromZ = player.z;
+      dunk.x = player.x; dunk.z = player.z;
+      dunk.lift = 0; dunk.hang = 0; dunk.released = false; dunk.afterScore = 0;
+      player.x = DUNK_SPOT.x; player.z = DUNK_SPOT.z;
+      bandDirty = true;
+      ball.live = false; ball.scored = false;
+      settleTimer = 0; shotTimer = 0;
+      return;
+    }
+
+    // 방향은 항상 림을 향한다 — 플레이어는 강도만 맞추면 된다
+    const D = distToRim();
+    ball.dx = (player.x - 0) / D;
+    ball.dz = (player.z - HOOP_Z) / D;
+    ball.p = D;
+    ball.y = RELEASE_H;
+    const speed = speedOf(p);
+    ball.vp = -Math.cos(SHOT_ANGLE) * speed;
+    ball.vy = Math.sin(SHOT_ANGLE) * speed;
+    ball.rot = 0;
+    ball.live = true; ball.scored = false;
+    settleTimer = 0; shotTimer = 0;
+  }
+
+  function dunkHand() {       // drawPlayer 의 오른손 위치와 같은 값
+    return { x: dunk.x + 0.14, y: REACH + dunk.lift, z: dunk.z };
+  }
+
+  function slam() {
+    dunk.released = true;
+    ball.dx = 0; ball.dz = 1;
+    ball.p = 0.06; ball.y = RIM_H + BALL_R + 0.06;
+    ball.vp = -0.012; ball.vy = -0.08;
+    ball.rot = 0; ball.live = true; ball.scored = false;
+    settleTimer = 0; shotTimer = 0;
+    message = "DUNK!"; messageColor = "#4ade80"; messageTimer = 110;
+  }
+
+  function reset() {
+    shots = 0; score = 0; makes = 0; gameOver = false;
+    message = ""; messageTimer = 0; rimFlash = 0; lastPower = null;
+    player.x = 0; player.z = FT_Z;
+    dunk.active = false; dunk.lift = 0; dunk.hang = 0;
+    bandDirty = true;
+    newBall();
+  }
+
+  function newBall() {
+    ball.live = false; ball.scored = false;
+    ball.p = 0; ball.y = RELEASE_H; ball.vp = 0; ball.vy = 0; ball.rot = 0;
+    settleTimer = 0; shotTimer = 0;
+  }
+
+  function endShot() {
+    if (ball.scored) {
+      makes++; score += shotValue;
+    } else if (!shotIsDunk && gauge) {
+      const mid = (gauge.bandLo + gauge.bandHi) / 2;
+      const diff = lastPower - mid;
+      message = (Math.abs(diff) < 14 ? "아깝다! 조금 " : "너무 ") + (diff < 0 ? "약해요" : "강해요");
+      messageColor = "#ff9a5c"; messageTimer = 75;
+    } else {
+      message = "MISS"; messageColor = "#ff7a7a"; messageTimer = 70;
+    }
+
+    if (shots >= TOTAL_SHOTS) { gameOver = true; ball.live = false; }
+    else newBall();
+  }
+
+  function stepDunk() {
+    dunk.t++;
+    if (dunk.phase === "rise") {
+      const p = Math.min(1, dunk.t / RISE_F);
+      const ease = 1 - Math.pow(1 - p, 2);
+      dunk.x = dunk.fromX + (DUNK_SPOT.x - dunk.fromX) * ease;
+      dunk.z = dunk.fromZ + (DUNK_SPOT.z - dunk.fromZ) * ease;
+      dunk.lift = (GRAB_H + 0.12) * Math.sin(p * Math.PI / 2);
+      if (dunk.t >= RISE_F) {
+        slam();
+        dunk.phase = "hang"; dunk.dropFrom = dunk.lift; dunk.t = 0;
+      }
+      return;
+    }
+    if (dunk.phase === "hang") {
+      dunk.x = DUNK_SPOT.x; dunk.z = DUNK_SPOT.z;
+      dunk.lift += (GRAB_H - dunk.lift) * 0.25;
+      dunk.hang += (1 - dunk.hang) * 0.12;
+      if (ball.scored) dunk.afterScore++;
+      if (dunk.afterScore > HANG_AFTER_SCORE || dunk.t > HANG_MAX) {
+        dunk.phase = "drop"; dunk.dropFrom = dunk.lift; dunk.t = 0;
+      }
+      return;
+    }
+    const p = Math.min(1, dunk.t / DROP_F);
+    dunk.lift = dunk.dropFrom * (1 - p * p);
+    dunk.hang += (0 - dunk.hang) * 0.2;
+    if (dunk.t >= DROP_F) { dunk.active = false; dunk.lift = 0; dunk.hang = 0; }
+  }
+
+  function step() {
+    moving = false;
+    if (!busy() && !gameOver) {
+      let mx = (keys.R ? 1 : 0) - (keys.L ? 1 : 0);
+      let mz = (keys.D ? 1 : 0) - (keys.U ? 1 : 0);   // 위 = 림 쪽 = z 감소
+      if (mx || mz) {
+        const n = Math.hypot(mx, mz) || 1;
+        player.x = Math.max(PLAYER_MIN_X, Math.min(PLAYER_MAX_X, player.x + mx / n * MOVE_SPEED));
+        player.z = Math.max(PLAYER_MIN_Z, Math.min(PLAYER_MAX_Z, player.z + mz / n * MOVE_SPEED));
+        bandDirty = true;
+        moving = true;
+        if (mx) dribSide = mx > 0 ? 1 : -1;           // 오른쪽=오른손, 왼쪽=왼손
+      }
+    }
+    if (bandDirty && !keys.L && !keys.R && !keys.U && !keys.D && !dunk.active) refreshBand();
+
+    if (dunk.active) stepDunk();
+    if (!ball.live) return;
+
+    const was = ball.scored;
+    advance(ball);
+    shotTimer++;
+
+    if (ball.scored && !was) {
+      if (!shotIsDunk) {
+        message = shotValue === 3 ? "3 POINTS!" : "GOAL!";
+        messageColor = shotValue === 3 ? "#60a5fa" : "#4ade80";
+        messageTimer = 75;
+      }
+      rimFlash = 45;
+    }
+
+    const resting = ball.y - BALL_R <= 0.01 && Math.abs(ball.vy) < 0.025 && Math.abs(ball.vp) < 0.015;
+    settleTimer = resting ? settleTimer + 1 : 0;
+    if (settleTimer > 25 || shotTimer > SHOT_TIMEOUT) { ball.live = false; endShot(); }
+  }
+
+  // 공의 3D 위치 (그리기용)
+  function ballPos() {
+    return { x: ball.dx * ball.p, y: ball.y, z: HOOP_Z + ball.dz * ball.p };
+  }
+
+  // ===== 그리기 =====
+  const RIM_ORANGE = [255, 107, 44], RIM_GREEN = [52, 230, 120];
+  const SKIN = "#d9a273", SKIN_DK = "#b8835a";
+  const JERSEY = "#f3c542", JERSEY_DK = "#c99c22", TRIM = "#5b2d8e";
+  const mix = (a, b, t) => "rgb(" + Math.round(a[0] + (b[0] - a[0]) * t) + "," +
+    Math.round(a[1] + (b[1] - a[1]) * t) + "," + Math.round(a[2] + (b[2] - a[2]) * t) + ")";
+  const lerpPt = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+
+  function pathPts(pts, close) {
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const q = proj(pts[i][0], pts[i][2] || 0, pts[i][1]);
+      if (i === 0) ctx.moveTo(q.x, q.y); else ctx.lineTo(q.x, q.y);
+    }
+    if (close) ctx.closePath();
+  }
+  function arcPts(cx, cz, r, a0, a1, n) {
+    const out = [];
+    for (let i = 0; i <= n; i++) {
+      const t = a0 + (a1 - a0) * i / n;
+      out.push([cx + r * Math.sin(t), cz + r * Math.cos(t)]);
+    }
+    return out;
+  }
+
+  function drawCourt() {
+    const g = ctx.createLinearGradient(0, 0, 0, PANEL_Y);
+    g.addColorStop(0, "#161a23");
+    g.addColorStop(1, "#0f1218");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, PANEL_Y);
+
+    // 마루
+    pathPts([[-COURT_W / 2, 0], [COURT_W / 2, 0], [COURT_W / 2, COURT_L], [-COURT_W / 2, COURT_L]], true);
+    const fg = ctx.createLinearGradient(0, 250, 0, 610);
+    fg.addColorStop(0, "#9a6530");
+    fg.addColorStop(1, "#7d4f24");
+    ctx.fillStyle = fg;
+    ctx.fill();
+
+    ctx.lineJoin = "round";
+    const LINE = "rgba(255,255,255,.8)";
+
+    // 페인트존
+    pathPts([[-KEY_W / 2, 0], [KEY_W / 2, 0], [KEY_W / 2, FT_Z], [-KEY_W / 2, FT_Z]], true);
+    ctx.fillStyle = "rgba(190,110,50,.45)";
+    ctx.fill();
+    ctx.strokeStyle = LINE; ctx.lineWidth = 2.5; ctx.stroke();
+
+    // 3점 라인 (코너 직선 + 아크)
+    const tMax = Math.asin(CORNER_X / THREE_R);
+    const cz = HOOP_Z + THREE_R * Math.cos(tMax);
+    ctx.strokeStyle = "#dbe6ff"; ctx.lineWidth = 3;
+    pathPts([[-CORNER_X, 0], [-CORNER_X, cz]]); ctx.stroke();
+    pathPts([[CORNER_X, 0], [CORNER_X, cz]]); ctx.stroke();
+    pathPts(arcPts(0, HOOP_Z, THREE_R, -tMax, tMax, 48)); ctx.stroke();
+
+    // 자유투 서클 / 제한구역
+    ctx.strokeStyle = LINE; ctx.lineWidth = 2.5;
+    pathPts(arcPts(0, FT_Z, FT_R, 0, Math.PI * 2, 40), true); ctx.stroke();
+    pathPts(arcPts(0, HOOP_Z, RESTRICT_R, -Math.PI / 2, Math.PI / 2, 24)); ctx.stroke();
+
+    // 외곽선
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 3;
+    pathPts([[-COURT_W / 2, 0], [COURT_W / 2, 0], [COURT_W / 2, COURT_L], [-COURT_W / 2, COURT_L]], true);
+    ctx.stroke();
+
+    // 선수 발밑 표시 (2점/3점/덩크)
+    if (!dunk.active) {
+      const d = distToRim();
+      const col = d < DUNK_RANGE ? "rgba(243,197,66,.9)"
+                : (isThree() ? "rgba(96,165,250,.9)" : "rgba(255,255,255,.5)");
+      ctx.strokeStyle = col; ctx.lineWidth = 2;
+      pathPts(arcPts(player.x, player.z, 0.55, 0, Math.PI * 2, 24), true);
+      ctx.stroke();
+    }
+  }
+
+  function drawHoop() {
+    const flash = Math.min(1, rimFlash / 30);
+    const sag = dunk.active && dunk.phase === "hang" ? 0.05 * dunk.hang : 0;
+
+    // 지지대
+    const base = proj(0, 0, -0.9), top = proj(0, BOARD_TOP + 0.1, -0.9);
+    ctx.strokeStyle = "#5a6070"; ctx.lineWidth = 10;
+    ctx.beginPath(); ctx.moveTo(base.x, base.y); ctx.lineTo(top.x, top.y); ctx.stroke();
+    const arm0 = proj(0, (BOARD_BOT + BOARD_TOP) / 2, -0.9);
+    const arm1 = proj(0, (BOARD_BOT + BOARD_TOP) / 2, BOARD_Z);
+    ctx.lineWidth = 8;
+    ctx.beginPath(); ctx.moveTo(arm0.x, arm0.y); ctx.lineTo(arm1.x, arm1.y); ctx.stroke();
+
+    // 백보드
+    pathPts([[-BOARD_W / 2, BOARD_Z, BOARD_TOP], [BOARD_W / 2, BOARD_Z, BOARD_TOP],
+             [BOARD_W / 2, BOARD_Z, BOARD_BOT], [-BOARD_W / 2, BOARD_Z, BOARD_BOT]], true);
+    ctx.fillStyle = "rgba(226,234,248,.92)"; ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,.9)"; ctx.lineWidth = 2; ctx.stroke();
+
+    pathPts([[-SQ_W / 2, BOARD_Z, RIM_H + SQ_H], [SQ_W / 2, BOARD_Z, RIM_H + SQ_H],
+             [SQ_W / 2, BOARD_Z, RIM_H], [-SQ_W / 2, BOARD_Z, RIM_H]], true);
+    ctx.strokeStyle = flash > 0 ? mix([207, 58, 58], RIM_GREEN, flash) : "#cf3a3a";
+    ctx.lineWidth = 3; ctx.stroke();
+
+    // 네트
+    ctx.strokeStyle = flash > 0
+      ? "rgba(" + Math.round(140 + 90 * flash) + ",255," + Math.round(170 + 50 * flash) + ",.75)"
+      : "rgba(255,255,255,.5)";
+    ctx.lineWidth = 1.3;
+    for (let i = 0; i < 12; i++) {
+      const t = i / 12 * Math.PI * 2;
+      const a = proj(RIM_R * Math.sin(t), RIM_H - sag, HOOP_Z + RIM_R * Math.cos(t));
+      const b = proj(RIM_R * 0.55 * Math.sin(t), RIM_H - 0.4 - sag, HOOP_Z + RIM_R * 0.55 * Math.cos(t));
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    for (let j = 1; j <= 3; j++) {
+      const k = 1 - j * 0.15, hh = RIM_H - 0.4 * (j / 3) - sag;
+      pathPts(arcPts(0, HOOP_Z, RIM_R * k, 0, Math.PI * 2, 20).map(p => [p[0], p[1], hh]), true);
+      ctx.stroke();
+    }
+
+    // 림
+    if (flash > 0) { ctx.shadowColor = "rgba(52,230,120,.9)"; ctx.shadowBlur = 20; }
+    ctx.strokeStyle = flash > 0 ? mix(RIM_ORANGE, RIM_GREEN, flash) : "rgb(255,107,44)";
+    ctx.lineWidth = 5;
+    pathPts(arcPts(0, HOOP_Z, RIM_R, 0, Math.PI * 2, 28).map(p => [p[0], p[1], RIM_H - sag]), true);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+  }
+
+  // ---- 선수 (뒷모습) ----
+  function drawPlayer() {
+    const px = dunk.active ? dunk.x : player.x;
+    const pz = dunk.active ? dunk.z : player.z;
+    const lift = dunk.active ? dunk.lift : 0;
+    const s = FOCAL / (CAM_Z - pz);
+    const P = (dx, h) => proj(px + dx, h + lift, pz);
+    const lw = (m) => Math.max(1.5, s * m);
+
+    function limb(pts, m, color) {
+      ctx.strokeStyle = color; ctx.lineWidth = lw(m);
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    }
+
+    // 그림자
+    const sh = proj(px, 0, pz);
+    const shr = s * 0.42 * (1 - Math.min(0.55, lift / 1.6));
+    ctx.fillStyle = "rgba(0,0,0,.33)";
+    ctx.beginPath(); ctx.ellipse(sh.x, sh.y, shr, shr * 0.34, 0, 0, Math.PI * 2); ctx.fill();
+
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+
+    const hang = dunk.active ? dunk.hang : 0;
+
+    // 관절 (m)
+    const footY = dunk.active ? (0.30 - 0.26 * hang) : 0.25;
+    const hipY = 0.98, shoY = 1.55, headY = 1.76;
+
+    const hipL = P(-0.13, hipY), hipR = P(0.13, hipY);
+    const shoL = P(-0.21, shoY), shoR = P(0.21, shoY);
+    const hd = P(0, headY), headR = Math.max(3, s * 0.115);
+
+    const kneeL = P(-0.17, hipY - (dunk.active ? 0.42 - 0.04 * hang : 0.36));
+    const kneeR = P(0.17, hipY - (dunk.active ? 0.40 - 0.04 * hang : 0.34));
+    const footL = P(-0.19, footY), footR = P(0.19, footY);
+
+    // 다리
+    limb([hipL, kneeL, footL], 0.1, SKIN);
+    limb([hipR, kneeR, footR], 0.1, SKIN);
+    ctx.strokeStyle = "#f2f4f8"; ctx.lineWidth = lw(0.09);
+    ctx.beginPath(); ctx.moveTo(footL.x - s * 0.05, footL.y); ctx.lineTo(footL.x + s * 0.05, footL.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(footR.x - s * 0.05, footR.y); ctx.lineTo(footR.x + s * 0.05, footR.y); ctx.stroke();
+
+    // 반바지 + 몸통
+    limb([hipL, hipR], 0.26, JERSEY_DK);
+    limb([P(-0.1, hipY), P(-0.14, hipY - 0.26)], 0.17, JERSEY_DK);
+    limb([P(0.1, hipY), P(0.14, hipY - 0.26)], 0.17, JERSEY_DK);
+    limb([P(0, hipY), P(0, shoY)], 0.40, JERSEY);
+    limb([shoL, shoR], 0.30, JERSEY);
+
+    // 팔
+    if (dunk.active) {
+      // 오른팔로 림을 잡는다 (손끝이 림 높이)
+      const elbowR = P(0.20, shoY + 0.34);
+      const handR = P(0.14, REACH);
+      const elbowL = P(-0.26, shoY - 0.18);
+      const handL = P(-0.30, shoY - 0.52);
+      limb([shoL, elbowL, handL], 0.085, SKIN_DK);
+      limb([shoR, elbowR, handR], 0.095, SKIN);
+    } else {
+      const u = armsUp;
+      // 드리블하는 손은 공 바로 위에서 같이 오르내린다
+      const dribH = dribbling
+        ? DRIB_HAND_H + 0.12 * Math.abs(Math.cos(Math.PI * dribPhase)) - 0.06
+        : DRIB_HAND_H;
+      const rightDrib = dribSide > 0;
+
+      const downEL = P(-0.27, 1.26), downER = P(0.27, 1.26);
+      const downHL = P(rightDrib ? -0.26 : -0.34, rightDrib ? 1.0 : dribH);
+      const downHR = P(rightDrib ? 0.34 : 0.26, rightDrib ? dribH : 1.0);
+
+      const upEL = P(-0.22, shoY + 0.30), upER = P(0.22, shoY + 0.30);
+      const upHL = P(-0.13, 2.18), upHR = P(0.13, 2.18);
+
+      limb([shoL, lerpPt(downEL, upEL, u), lerpPt(downHL, upHL, u)], 0.085, SKIN_DK);
+      limb([shoR, lerpPt(downER, upER, u), lerpPt(downHR, upHR, u)], 0.095, SKIN);
+    }
+
+    // 목 + 머리 (뒷모습이라 뒤통수)
+    limb([P(0, shoY), P(0, headY - 0.09)], 0.08, SKIN);
+    ctx.fillStyle = SKIN;
+    ctx.beginPath(); ctx.arc(hd.x, hd.y, headR, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#241a14";
+    ctx.beginPath(); ctx.arc(hd.x, hd.y - headR * 0.12, headR * 0.96, 0, Math.PI * 2); ctx.fill();
+
+    ctx.lineCap = "butt"; ctx.lineJoin = "miter";
+  }
+
+  function drawBall() {
+    let b;
+    if (dunk.active && !dunk.released) {
+      const h = dunkHand();
+      b = { x: h.x + 0.1, y: h.y + 0.14, z: h.z };
+    } else if (!ball.live && !dunk.active) {
+      b = heldBallPos();
+    } else {
+      b = ballPos();
+    }
+
+    const q = proj(b.x, b.y, b.z);
+    const r = Math.max(3, q.s * BALL_R);
+
+    if (q.y + r < 0) {
+      ctx.fillStyle = "rgba(240,154,74,.9)";
+      ctx.beginPath(); ctx.moveTo(q.x, 6); ctx.lineTo(q.x - 9, 22); ctx.lineTo(q.x + 9, 22);
+      ctx.closePath(); ctx.fill();
+      return;
+    }
+
+    ctx.save();
+    ctx.translate(q.x, q.y);
+    ctx.rotate(ball.rot);
+    const g = ctx.createRadialGradient(-r * 0.35, -r * 0.35, r * 0.1, 0, 0, r);
+    g.addColorStop(0, "#f09a4a"); g.addColorStop(1, "#d2641d");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "rgba(40,20,5,.75)"; ctx.lineWidth = Math.max(0.8, r * 0.09);
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-r, 0); ctx.lineTo(r, 0); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(0, 0, r * 0.5, r, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawGauge() {
+    const gw = 230, gh = 24;
+    const gx = (W - gw) / 2, gy = PANEL_Y + 34;
+
+    if (inDunkRange() && !ball.live) {
+      ctx.textAlign = "center";
+      ctx.fillStyle = "#f3c542";
+      ctx.font = "bold 20px sans-serif";
+      ctx.fillText("방향키 이동   ·   SPACE 누르면 바로 덩크!", W / 2, gy + 18);
+      ctx.textAlign = "left";
+      return;
+    }
+
+    ctx.fillStyle = "rgba(255,255,255,.12)";
+    ctx.fillRect(gx, gy, gw, gh);
+
+    if (gauge) {
+      const x0 = gx + gw * gauge.bandLo / 100, x1 = gx + gw * gauge.bandHi / 100;
+      ctx.fillStyle = "rgba(74,222,128,.38)";
+      ctx.fillRect(x0, gy, x1 - x0, gh);
+    }
+    if (lastPower !== null) {
+      ctx.fillStyle = "rgba(255,255,255,.75)";
+      ctx.fillRect(gx + gw * lastPower / 100 - 1, gy - 3, 2, gh + 6);
+    }
+    if (charging && power > 0) {
+      ctx.fillStyle = power > 94 ? "#ff5252" : "#e9ecf1";
+      ctx.fillRect(gx, gy, gw * power / 100, gh);
+    }
+    ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.lineWidth = 1;
+    ctx.strokeRect(gx + .5, gy + .5, gw - 1, gh - 1);
+
+    ctx.textAlign = "center";
+    if (charging) {
+      ctx.fillStyle = "#e9ecf1"; ctx.font = "bold 22px sans-serif";
+      ctx.fillText(Math.round(power) + "%", W / 2, gy - 12);
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,.55)"; ctx.font = "15px sans-serif";
+      ctx.fillText(gameOver ? "SPACE 로 다시 시작"
+        : "방향키 이동   ·   SPACE 눌렀다 초록 구간에서 놓기 (조준은 자동)", W / 2, gy - 12);
+    }
+    ctx.textAlign = "left";
+  }
+
+  function drawHUD() {
+    ctx.fillStyle = "#e9ecf1"; ctx.font = "bold 30px sans-serif"; ctx.textAlign = "left";
+    ctx.fillText("SCORE  " + score, 28, 46);
+
+    ctx.font = "17px sans-serif"; ctx.fillStyle = "#9aa3b2";
+    ctx.fillText("남은 슛  " + Math.max(0, TOTAL_SHOTS - shots) + " / " + TOTAL_SHOTS +
+                 "   ·   성공  " + makes, 28, 74);
+
+    const d = distToRim();
+    const dunkMode = d < DUNK_RANGE;
+    const three = isThree();
+    const label = dunkMode ? "덩크 존 · 2점" : (three ? "3점" : "2점");
+    const col = dunkMode ? "#f3c542" : (three ? "#60a5fa" : "#9aa3b2");
+    ctx.font = "bold 17px sans-serif"; ctx.fillStyle = col;
+    ctx.fillText(label + "   ·   림까지 " + d.toFixed(2) + "m", 28, 102);
+
+    if (messageTimer > 0 && !gameOver) {
+      ctx.textAlign = "center";
+      ctx.globalAlpha = Math.min(1, messageTimer / 25);
+      ctx.fillStyle = messageColor;
+      const big = message === "DUNK!" || message === "3 POINTS!" || message === "GOAL!";
+      ctx.font = (big ? "bold 54px" : "bold 32px") + " sans-serif";
+      ctx.fillText(message, W / 2, 86);
+      ctx.globalAlpha = 1; ctx.textAlign = "left";
+    }
+  }
+
+  function drawGameOver() {
+    ctx.fillStyle = "rgba(10,12,16,.84)"; ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#9aa3b2"; ctx.font = "20px sans-serif";
+    ctx.fillText("GAME OVER", W / 2, H / 2 - 100);
+    ctx.fillStyle = "#e9ecf1"; ctx.font = "bold 64px sans-serif";
+    ctx.fillText(score + " 점", W / 2, H / 2 - 30);
+    ctx.fillStyle = "#9aa3b2"; ctx.font = "19px sans-serif";
+    ctx.fillText(TOTAL_SHOTS + "번 중 " + makes + "번 성공 (" +
+                 Math.round(makes / TOTAL_SHOTS * 100) + "%)", W / 2, H / 2 + 10);
+    let grade = "다시 도전!";
+    if (score >= 24) grade = "레전드 🏆";
+    else if (score >= 18) grade = "에이스 🔥";
+    else if (score >= 12) grade = "준수함 👍";
+    else if (score >= 6) grade = "연습이 필요해요";
+    ctx.fillStyle = "#ffb84d"; ctx.font = "bold 26px sans-serif";
+    ctx.fillText(grade, W / 2, H / 2 + 52);
+    ctx.fillStyle = "rgba(255,255,255,.6)"; ctx.font = "17px sans-serif";
+    ctx.fillText("SPACE 를 누르면 다시 시작합니다", W / 2, H / 2 + 104);
+    ctx.textAlign = "left";
+  }
+
+  function tickTimers() {
+    if (messageTimer > 0) messageTimer--;
+    if (rimFlash > 0) rimFlash--;
+    if (charging) {
+      power += powerDir * CHARGE_RATE;
+      if (power >= 100) { power = 100; powerDir = -1; }
+      if (power <= 0) { power = 0; powerDir = 1; }
+    }
+
+    // 슛 준비/릴리스 때만 팔을 든다
+    const wantUp = (charging || (ball.live && !shotIsDunk && shotTimer < 25)) ? 1 : 0;
+    armsUp += (wantUp - armsUp) * 0.3;
+
+    // 드리블: 움직이기 시작하면 튀고, 멈추면 그 한 번을 마치고 손에 잡힌다
+    if (moving) dribbling = true;
+    if (dribbling && !charging && !ball.live && !dunk.active) {
+      dribPhase += 1 / DRIB_PERIOD;
+      if (dribPhase >= 1) { dribPhase = 0; if (!moving) dribbling = false; }
+    } else if (!moving) {
+      dribbling = false; dribPhase = 0;
+    }
+  }
+
+  // 손에 들고 있을 때(드리블 포함) 공의 3D 위치
+  function heldBallPos() {
+    const bx = player.x + 0.34 * dribSide;
+    const bz = player.z - 0.05;
+    const by = dribbling
+      ? BALL_R + (DRIB_HAND_H - BALL_R) * Math.abs(Math.cos(Math.PI * dribPhase))
+      : DRIB_HAND_H;
+    const u = armsUp;                      // 슛 준비하면 머리 위로 올라간다
+    return {
+      x: bx + (player.x - bx) * u,
+      y: by + (RELEASE_H - by) * u,
+      z: bz + ((player.z - 0.15) - bz) * u
+    };
+  }
+
+  function draw() {
+    drawCourt();
+    // 림보다 뒤(= z가 작은 쪽)면 선수를 먼저, 아니면 골대를 먼저 그린다
+    const pz = dunk.active ? dunk.z : player.z;
+    if (pz < HOOP_Z) { drawPlayer(); drawHoop(); }
+    else { drawHoop(); drawPlayer(); }
+    drawBall();
+    ctx.fillStyle = "#0f1115";
+    ctx.fillRect(0, PANEL_Y, W, H - PANEL_Y);
+    drawGauge();
+    drawHUD();
+    if (gameOver) drawGameOver();
+  }
+
+  let acc = 0, last = 0;
+  function loop(now) {
+    if (!last) last = now;
+    acc += Math.min(now - last, 200);
+    last = now;
+    while (acc >= STEP_MS) { step(); tickTimers(); acc -= STEP_MS; }
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  newBall();
+  refreshBand();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
