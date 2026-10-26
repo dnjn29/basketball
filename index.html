@@ -54,27 +54,61 @@
   // three_pt / two_pt / dunk / speed 는 0~100
   const PLAYERS = {
     jordan: { name: "마이클 조던",      number: 23, three_pt: 75,  two_pt: 97, dunk: 95, speed: 95,
+              power: 80, jump: 98, block: 75, steal: 95,
               uniform: "#c8102e", hair: null,      bald: true,  shoe: "#15161a", shoeAccent: "#e03131" },
     lebron: { name: "르브론 제임스",    number: 23, three_pt: 80,  two_pt: 95, dunk: 97, speed: 90,
+              power: 98, jump: 92, block: 85, steal: 80,
               uniform: "#552583", hair: "#1a1a1a", bald: false, shoe: "#552583", shoeAccent: "#fdb927" },
     kobe:   { name: "코비 브라이언트",  number: 24, three_pt: 82,  two_pt: 96, dunk: 90, speed: 88,
+              power: 78, jump: 90, block: 60, steal: 88,
               uniform: "#f3c542", hair: "#1a1a1a", bald: false, shoe: "#15161a", shoeAccent: "#8a4fd0" },
     curry:  { name: "스테픈 커리",      number: 30, three_pt: 100, two_pt: 85, dunk: 55, speed: 85,
+              power: 55, jump: 65, block: 30, steal: 82,
               uniform: "#1d428a", hair: "#6b4423", bald: false, shoe: "#2b63c9", shoeAccent: "#ffd93d" },
     magic:  { name: "매직 존슨",        number: 32, three_pt: 60,  two_pt: 88, dunk: 70, speed: 80,
+              power: 85, jump: 75, block: 55, steal: 85,
               uniform: "#ffd93d", hair: "#1a1a1a", bald: false, shoe: "#f2f4f8", shoeAccent: "#8a4fd0" },
     bird:   { name: "래리 버드",        number: 33, three_pt: 92,  two_pt: 94, dunk: 50, speed: 65,
+              power: 80, jump: 60, block: 60, steal: 85,
               uniform: "#007a33", hair: "#d9b45b", bald: false, shoe: "#f2f4f8", shoeAccent: "#2aa84a" },
     kareem: { name: "카림 압둘-자바",   number: 33, three_pt: 20,  two_pt: 98, dunk: 88, speed: 55,
+              power: 92, jump: 85, block: 98, steal: 45,
               uniform: "#552583", hair: null,      bald: true,  shoe: "#f2f4f8", shoeAccent: "#15161a" }
   };
   const PLAYER_KEYS = ["jordan", "lebron", "kobe", "curry", "magic", "bird", "kareem"];
 
-  let scene = "select";                 // "select" → "play"
+  let scene = "mode";                   // "mode" → "select" → "play"
   let myKey = "jordan", rivalKey = "lebron";
-  let pick = 0;                         // 선택 화면 커서
+  let pick = 0;                         // 선수 선택 커서
   let rivalScore = 0;
   const me = () => PLAYERS[myKey];
+  const foe = () => PLAYERS[rivalKey];
+
+  // ===== 대결 모드 =====
+  let vsMode = false;                   // false = 혼자 10구 연습
+  let modePick = 0;                     // 0 연습 / 1 대결
+  let diffPick = 1;                     // 0 쉬움 / 1 보통 / 2 어려움
+  const DIFFS = [
+    { name: "쉬움",   aim: 0.62, react: 0.55, aggr: 0.45, spd: 0.80 },
+    { name: "보통",   aim: 0.80, react: 0.78, aggr: 0.70, spd: 0.92 },
+    { name: "어려움", aim: 0.97, react: 1.00, aggr: 1.00, spd: 1.00 }
+  ];
+  const diff = () => DIFFS[diffPick];
+
+  const TARGET_SCORE = 21;              // 21점 선취
+  let myScore = 0, cpuScore = 0;
+  let possession = "me";                // "me" | "cpu"
+  let vsOver = false, vsWinner = null;
+
+  // CPU 선수
+  const cpu = { x: 0, z: 4.0, lift: 0, hang: 0, dribPhase: 0, dribSide: 1,
+                armsUp: 0, state: "idle", timer: 0, targetX: 0, targetZ: 6.5,
+                dunking: false, shotWillMake: false };
+
+  // 수비 액션
+  const defense = { blockT: 0, stealT: 0, blockLift: 0 };
+  let vsMsg = "", vsMsgTimer = 0, vsMsgColor = "#e9ecf1";
+  function say(t, c, f) { vsMsg = t; vsMsgColor = c || "#e9ecf1"; vsMsgTimer = f || 90; }
 
   // ===== 카메라 (하프코트 전체가 들어오는 방송 중계 앵글) =====
   // 베이스라인(z=0)이 화면 y=250·반폭 330px, 코트 앞단(z=10)이 y=600·반폭 580px 이 되도록 역산
@@ -183,9 +217,10 @@
   const inDunkRange = () => distToRim() < DUNK_RANGE;
   // 코너는 직선(6.6m), 그 위는 아크(6.75m) — 코트에 그려진 선과 같은 판정
   const CORNER_Z = HOOP_Z + THREE_R * Math.cos(Math.asin(CORNER_X / THREE_R));
-  const isThree = () => player.z <= CORNER_Z
-    ? Math.abs(player.x) >= CORNER_X
-    : distToRim() >= THREE_R;
+  const isThreeAt = (x, z) => z <= CORNER_Z
+    ? Math.abs(x) >= CORNER_X
+    : hoopDist(x, z) >= THREE_R;
+  const isThree = () => isThreeAt(player.x, player.z);
 
   // ===== 물리: 슛 평면 (p, y) 에서 한 스텝 =====
   function advance(o) {
@@ -296,12 +331,25 @@
 
   // 키보드와 터치가 같은 함수를 쓴다
   function pressShoot() {
-    if (gameOver) { scene = "select"; return; }   // 끝나면 선수 선택으로 돌아간다
+    if (gameOver) { scene = "mode"; return; }     // 끝나면 처음 화면으로
+    // 대결 모드 수비 중이면 블락 점프 (판정은 CPU 가 슛하는 순간)
+    if (vsMode && possession === "cpu" && checkT <= 0) {
+      if (defense.blockT <= 0) defense.blockT = 24;
+      return;
+    }
+    if (vsMode && (checkT > 0 || possession !== "me")) return;
     if (busy()) return;
     if (inDunkRange()) { launch(null); return; }   // 덩크는 누르는 즉시
     if (!gauge) return;
     charging = true; power = 0; powerDir = 1;
   }
+  // 스틸 시도 (수비 중에만)
+  function pressSteal() {
+    if (!vsMode || possession !== "cpu" || checkT > 0 || vsOver) return;
+    if (defense.stealT > 0) return;               // 연타 방지
+    defense.stealT = 26;
+  }
+
   function releaseShoot() {
     if (!charging) return;
     charging = false;
@@ -310,7 +358,26 @@
   }
 
   window.addEventListener("keydown", (e) => {
-    // 선택 화면
+    // 모드 / 난이도 화면
+    if (scene === "mode") {
+      const mk = keyOf(e);
+      if (mk === "L" || mk === "R") {
+        e.preventDefault();
+        if (modePick === 1) diffPick = Math.max(0, Math.min(2, diffPick + (mk === "R" ? 1 : -1)));
+        return;
+      }
+      if (mk === "U") { e.preventDefault(); modePick = 0; return; }
+      if (mk === "D") { e.preventDefault(); modePick = 1; return; }
+      if (isSpace(e) || e.key === "Enter") {
+        e.preventDefault(); vsMode = modePick === 1; scene = "select";
+      }
+      return;
+    }
+    // 수비 중 스틸
+    if (scene === "play" && (e.key === "Shift" || e.code === "ShiftLeft" || e.code === "ShiftRight")) {
+      e.preventDefault(); pressSteal(); return;
+    }
+    // 선수 선택 화면
     if (scene === "select") {
       const mk = keyOf(e);
       if (mk === "L") { e.preventDefault(); pick = (pick + PLAYER_KEYS.length - 1) % PLAYER_KEYS.length; return; }
@@ -343,6 +410,7 @@
 
   const joyHome = () => ({ x: 185, y: H - 120 });
   const shootHome = () => ({ x: W - 175, y: H - 120 });
+  const stealHome = () => ({ x: W - 330, y: H - 150 });
 
   function canvasPt(e) {
     const r = canvas.getBoundingClientRect();
@@ -355,7 +423,23 @@
     e.preventDefault();
     const p = canvasPt(e);
 
-    // 선택 화면: 카드를 누르면 선택, 고른 카드를 한 번 더 누르면 시작
+    // 모드 화면
+    if (scene === "mode") {
+      for (let i = 0; i < 2; i++) {
+        const b = modeBox(i);
+        if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
+          if (modePick === i) { vsMode = i === 1; scene = "select"; } else modePick = i;
+          return;
+        }
+      }
+      if (modePick === 1) for (let i = 0; i < 3; i++) {
+        const b = diffBox(i);
+        if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) { diffPick = i; return; }
+      }
+      return;
+    }
+
+    // 선수 선택 화면: 카드를 누르면 선택, 고른 카드를 한 번 더 누르면 시작
     if (scene === "select") {
       for (let i = 0; i < PLAYER_KEYS.length; i++) {
         const b = cardBox(i);
@@ -367,9 +451,15 @@
       return;
     }
 
-    if (gameOver) { scene = "select"; return; }
+    if (gameOver) { scene = "mode"; return; }
 
-    if (p.x > W / 2) {                       // 오른쪽 절반 = 슛 / 덩크
+    // 수비 중에는 오른쪽 아래 작은 버튼이 스틸
+    if (vsMode && possession === "cpu" && !vsOver) {
+      const sb = stealHome();
+      if (Math.hypot(p.x - sb.x, p.y - sb.y) < 74) { pressSteal(); return; }
+    }
+
+    if (p.x > W / 2) {                       // 오른쪽 절반 = 슛 / 블락
       if (shootId === null) { shootId = e.pointerId; pressShoot(); }
     } else if (joy.id === null) {            // 왼쪽 절반 = 이동
       joy.id = e.pointerId; joy.ox = p.x; joy.oy = p.y;
@@ -400,6 +490,7 @@
   // ===== 발사 =====
   function launch(p) {
     shots++;
+    shooter = "me";                        // 대결 모드에서 득점 주체
     shotIsDunk = inDunkRange();
     if (!shotIsDunk) lastPower = p;
     shotValue = shotIsDunk ? 2 : (isThree() ? 3 : 2);
@@ -429,6 +520,13 @@
     ball.rot = 0;
     ball.live = true; ball.scored = false;
     settleTimer = 0; shotTimer = 0;
+  }
+
+  // 덩크 점프 정점 — 점프 스탯이 높을수록 림 위로 더 뜬다.
+  // 실패한 덩크는 림에 손이 닿지 않는 높이까지만 뛴다.
+  function dunkApex(p, success) {
+    if (!success) return GRAB_H * (0.50 + 0.40 * (p.jump / 100));
+    return GRAB_H + 0.05 + 0.28 * (p.jump / 100);
   }
 
   function dunkHand() {       // drawPlayer 의 오른손 위치와 같은 값
@@ -469,6 +567,7 @@
   }
 
   function endShot() {
+    if (vsMode) { vsEndShot(); return; }
     if (ball.scored) {
       makes++; score += shotValue;
     } else if (shotIsDunk) {
@@ -493,7 +592,8 @@
       const ease = 1 - Math.pow(1 - p, 2);
       dunk.x = dunk.fromX + (DUNK_SPOT.x - dunk.fromX) * ease;
       dunk.z = dunk.fromZ + (DUNK_SPOT.z - dunk.fromZ) * ease;
-      dunk.lift = (GRAB_H + 0.12) * Math.sin(p * Math.PI / 2);
+      // 점프 스탯이 높을수록 더 높이 뜬다. 실패하면 림에 손이 못 닿는다
+      dunk.lift = dunkApex(me(), dunk.success) * Math.sin(p * Math.PI / 2);
       if (dunk.t >= RISE_F) {
         slam();
         dunk.phase = dunk.success ? "hang" : "drop";   // 실패하면 매달리지 않는다
@@ -519,6 +619,7 @@
 
   function step() {
     moving = false;
+    if (vsMode) vsStep();
     if (!busy() && !gameOver) {
       // 조이스틱이 잡혀 있으면 그쪽이 우선 (기울인 만큼 속도도 비례)
       let mx = joy.active ? joy.x : (keys.R ? 1 : 0) - (keys.L ? 1 : 0);
@@ -700,10 +801,18 @@
   }
 
   // ---- 선수 (뒷모습) ----
-  function drawPlayer() {
-    const px = dunk.active ? dunk.x : player.x;
-    const pz = dunk.active ? dunk.z : player.z;
-    const lift = dunk.active ? dunk.lift : 0;
+  // 내 선수와 CPU 가 같은 그리기 코드를 쓴다
+  function drawPlayer(st) {
+    st = st || {
+      x: dunk.active ? dunk.x : player.x,
+      z: dunk.active ? dunk.z : player.z,
+      lift: dunk.active ? dunk.lift : 0,
+      hang: dunk.active ? dunk.hang : 0,
+      dunkMode: dunk.active,
+      armsUp: armsUp, dribbling: dribbling, dribPhase: dribPhase, dribSide: dribSide,
+      data: me()
+    };
+    const px = st.x, pz = st.z, lift = st.lift;
     const s = FOCAL / (CAM_Z - pz);
     const P = (dx, h) => proj(px + dx, h + lift, pz);
     const lw = (m) => Math.max(1.5, s * m);
@@ -724,22 +833,22 @@
 
     ctx.lineCap = "round"; ctx.lineJoin = "round";
 
-    const hang = dunk.active ? dunk.hang : 0;
+    const hang = st.hang, dunkMode = st.dunkMode;
 
     // 관절 (m)
-    const footY = dunk.active ? (0.30 - 0.26 * hang) : 0.25;
+    const footY = dunkMode ? (0.30 - 0.26 * hang) : 0.25;
     const hipY = 0.98, shoY = 1.55, headY = 1.76;
 
     const hipL = P(-0.13, hipY), hipR = P(0.13, hipY);
     const shoL = P(-0.21, shoY), shoR = P(0.21, shoY);
     const hd = P(0, headY), headR = Math.max(3, s * 0.115);
 
-    const kneeL = P(-0.17, hipY - (dunk.active ? 0.42 - 0.04 * hang : 0.36));
-    const kneeR = P(0.17, hipY - (dunk.active ? 0.40 - 0.04 * hang : 0.34));
+    const kneeL = P(-0.17, hipY - (dunkMode ? 0.42 - 0.04 * hang : 0.36));
+    const kneeR = P(0.17, hipY - (dunkMode ? 0.40 - 0.04 * hang : 0.34));
     const footL = P(-0.19, footY), footR = P(0.19, footY);
 
     // 선수별 색
-    const P0 = me();
+    const P0 = st.data;
     const UNI = P0.uniform, UNI_DK = shade(UNI, 0.78);
 
     // 다리
@@ -771,7 +880,7 @@
     ctx.textAlign = "left";
 
     // 팔
-    if (dunk.active) {
+    if (dunkMode) {
       // 오른팔로 림을 잡는다 (손끝이 림 높이)
       const elbowR = P(0.20, shoY + 0.34);
       const handR = P(0.14, REACH);
@@ -780,12 +889,12 @@
       limb([shoL, elbowL, handL], 0.085, SKIN_DK);
       limb([shoR, elbowR, handR], 0.095, SKIN);
     } else {
-      const u = armsUp;
+      const u = st.armsUp;
       // 드리블하는 손은 공 바로 위에서 같이 오르내린다
-      const dribH = dribbling
-        ? DRIB_HAND_H + 0.12 * Math.abs(Math.cos(Math.PI * dribPhase)) - 0.06
+      const dribH = st.dribbling
+        ? DRIB_HAND_H + 0.12 * Math.abs(Math.cos(Math.PI * st.dribPhase)) - 0.06
         : DRIB_HAND_H;
-      const rightDrib = dribSide > 0;
+      const rightDrib = st.dribSide > 0;
 
       const downEL = P(-0.27, 1.26), downER = P(0.27, 1.26);
       const downHL = P(rightDrib ? -0.26 : -0.34, rightDrib ? 1.0 : dribH);
@@ -892,6 +1001,7 @@
   }
 
   function drawHUD() {
+    if (vsMode) { drawVsHUD(); return; }
     ctx.fillStyle = "#e9ecf1"; ctx.font = "bold 30px sans-serif"; ctx.textAlign = "left";
     ctx.fillText("SCORE  " + score, 28, 46);
 
@@ -927,7 +1037,74 @@
     }
   }
 
+  function drawVsHUD() {
+    const m = me(), f = foe();
+    const onOff = possession === "me";
+
+    // 양쪽 점수판
+    ctx.textAlign = "left";
+    ctx.fillStyle = m.uniform; ctx.font = "bold 17px sans-serif";
+    ctx.fillText("#" + m.number + " " + m.name, 28, 36);
+    ctx.fillStyle = "#e9ecf1"; ctx.font = "bold 46px sans-serif";
+    ctx.fillText(String(myScore), 28, 84);
+
+    ctx.textAlign = "right";
+    ctx.fillStyle = f.uniform; ctx.font = "bold 17px sans-serif";
+    ctx.fillText(f.name + " #" + f.number, W - 28, 36);
+    ctx.fillStyle = "#e9ecf1"; ctx.font = "bold 46px sans-serif";
+    ctx.fillText(String(cpuScore), W - 28, 84);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "rgba(255,255,255,.35)"; ctx.font = "14px sans-serif";
+    ctx.fillText(TARGET_SCORE + "점 선취  ·  " + diff().name, W / 2, 34);
+
+    // 공격 / 수비 표시
+    ctx.font = "bold 20px sans-serif";
+    ctx.fillStyle = onOff ? "#4ade80" : "#60a5fa";
+    ctx.fillText(onOff ? "내 공격" : "수비!", W / 2, 64);
+
+    if (!onOff && checkT <= 0 && !vsOver) {
+      ctx.fillStyle = "rgba(255,255,255,.45)"; ctx.font = "14px sans-serif";
+      ctx.fillText(touchUI ? "블락 = 오른쪽 큰 버튼 · 스틸 = 파란 버튼"
+                           : "블락 = SPACE · 스틸 = Shift", W / 2, 88);
+    }
+
+    if (vsMsgTimer > 0) {
+      ctx.globalAlpha = Math.min(1, vsMsgTimer / 20);
+      ctx.fillStyle = vsMsgColor; ctx.font = "bold 50px sans-serif";
+      ctx.fillText(vsMsg, W / 2, 150);
+      ctx.globalAlpha = 1;
+    }
+
+    // 지금 자리 배점
+    if (onOff && !vsOver) {
+      const d = distToRim();
+      const lbl = d < DUNK_RANGE ? "덩크 존 · 2점" : (isThree() ? "3점" : "2점");
+      ctx.fillStyle = d < DUNK_RANGE ? "#f3c542" : (isThree() ? "#60a5fa" : "rgba(255,255,255,.5)");
+      ctx.font = "bold 16px sans-serif";
+      ctx.fillText(lbl + "  ·  " + d.toFixed(2) + "m", W / 2, 118);
+    }
+    ctx.textAlign = "left";
+  }
+
+  function drawVsOver() {
+    ctx.fillStyle = "rgba(10,12,16,.86)"; ctx.fillRect(0, 0, W, H);
+    const win = vsWinner === "me";
+    ctx.textAlign = "center";
+    ctx.fillStyle = win ? "#4ade80" : "#ff7a7a";
+    ctx.font = "bold 72px sans-serif";
+    ctx.fillText(win ? "WIN 🏆" : "LOSE", W / 2, H / 2 - 60);
+    ctx.fillStyle = "#e9ecf1"; ctx.font = "bold 44px sans-serif";
+    ctx.fillText(myScore + "  :  " + cpuScore, W / 2, H / 2 + 10);
+    ctx.fillStyle = "rgba(255,255,255,.5)"; ctx.font = "18px sans-serif";
+    ctx.fillText(me().name + "   vs   " + foe().name + "  (" + diff().name + ")", W / 2, H / 2 + 52);
+    ctx.fillStyle = "rgba(255,255,255,.6)"; ctx.font = "17px sans-serif";
+    ctx.fillText(touchUI ? "화면을 누르면 처음으로" : "SPACE 를 누르면 처음으로", W / 2, H / 2 + 110);
+    ctx.textAlign = "left";
+  }
+
   function drawGameOver() {
+    if (vsMode) { drawVsOver(); return; }
     ctx.fillStyle = "rgba(10,12,16,.84)"; ctx.fillRect(0, 0, W, H);
     ctx.textAlign = "center";
     ctx.fillStyle = "#9aa3b2"; ctx.font = "20px sans-serif";
@@ -953,11 +1130,271 @@
     ctx.textAlign = "left";
   }
 
+  // ===== 대결 모드 엔진 =====
+  let shooter = "me";                 // 지금 공을 던진 쪽
+  let checkT = 0;                     // 공격권 리셋 대기
+  const CHECK_F = 50;
+
+  const cpuState = () => ({
+    x: cpu.x, z: cpu.z, lift: cpu.lift, hang: cpu.hang, dunkMode: cpu.dunking,
+    armsUp: cpu.armsUp, dribbling: possession === "cpu" && cpu.state === "drive",
+    dribPhase: cpu.dribPhase, dribSide: cpu.dribSide, data: foe()
+  });
+
+  function fireShot(sx, sz, speed) {
+    const D = Math.max(0.4, Math.hypot(sx, sz - HOOP_Z));
+    ball.dx = sx / D; ball.dz = (sz - HOOP_Z) / D;
+    ball.p = D; ball.y = RELEASE_H;
+    ball.vp = -Math.cos(SHOT_ANGLE) * speed;
+    ball.vy = Math.sin(SHOT_ANGLE) * speed;
+    ball.rot = 0; ball.live = true; ball.scored = false;
+    settleTimer = 0; shotTimer = 0;
+  }
+
+  function vsReset(full) {
+    if (full) {
+      myScore = 0; cpuScore = 0; vsOver = false; vsWinner = null;
+      possession = "me"; gameOver = false;
+    }
+    doCheck();
+  }
+
+  // 공격권 세팅 (탑에서 시작)
+  function doCheck() {
+    const off = possession === "me" ? player : cpu;
+    const def = possession === "me" ? cpu : player;
+    off.x = 0; off.z = 7.0;
+    def.x = 0; def.z = 5.3;
+    cpu.lift = 0; cpu.hang = 0; cpu.dunking = false; cpu.armsUp = 0;
+    cpu.state = possession === "cpu" ? "drive" : "guard";
+    cpu.timer = 40 + Math.round(Math.random() * 40);
+    pickCpuSpot();
+    dunk.active = false; dunk.lift = 0;
+    defense.blockT = 0; defense.stealT = 0; defense.blockLift = 0;
+    charging = false; power = 0;
+    newBall(); bandDirty = true;
+    checkT = CHECK_F;
+    // 방금 뜬 메시지(BLOCK!·리바운드·득점)를 덮지 않는다
+    if (vsMsgTimer < 12) say("CHECK", "#9aa3b2", CHECK_F);
+  }
+
+  // CPU 가 노릴 슛 지점 — 능력치에 따라 3점/골밑 취향이 갈린다
+  function pickCpuSpot() {
+    const f = foe();
+    const wantThree = Math.random() * 100 < f.three_pt * 0.7;
+    const wantDunk = !wantThree && Math.random() * 100 < f.dunk * 0.45;
+    const ang = (Math.random() - 0.5) * 1.5;
+    if (wantDunk) { cpu.targetX = Math.sin(ang) * 0.6; cpu.targetZ = HOOP_Z + 1.0; }
+    else if (wantThree) {
+      const r = THREE_R + 0.35 + Math.random() * 0.6;
+      cpu.targetX = Math.sin(ang) * r * 0.9; cpu.targetZ = HOOP_Z + Math.cos(ang) * r;
+    } else {
+      const r = 3.0 + Math.random() * 2.8;
+      cpu.targetX = Math.sin(ang) * r * 0.9; cpu.targetZ = HOOP_Z + Math.cos(ang) * r;
+    }
+    cpu.targetX = Math.max(PLAYER_MIN_X, Math.min(PLAYER_MAX_X, cpu.targetX));
+    cpu.targetZ = Math.max(PLAYER_MIN_Z, Math.min(PLAYER_MAX_Z, cpu.targetZ));
+  }
+
+  const cpuSpeed = () => BASE_MOVE_SPEED * (foe().speed / 100) * diff().spd;
+
+  // 몸싸움: 겹치면 파워가 높은 쪽이 밀어내고 낮은 쪽이 더 많이 밀려난다
+  const BODY_R = 0.62;
+  function bodyCollide() {
+    const dx = player.x - cpu.x, dz = player.z - cpu.z;
+    let d = Math.hypot(dx, dz);
+    if (d >= BODY_R) return;
+    if (d < 1e-4) { d = 1e-4; }
+    const ux = dx / d, uz = dz / d;
+    const push = BODY_R - d;
+    const pm = me().power, pc = foe().power;
+    const shareMe = pc / (pm + pc);      // 상대 파워가 셀수록 내가 많이 밀린다
+    const shareCpu = pm / (pm + pc);
+    player.x = Math.max(PLAYER_MIN_X, Math.min(PLAYER_MAX_X, player.x + ux * push * shareMe));
+    player.z = Math.max(PLAYER_MIN_Z, Math.min(PLAYER_MAX_Z, player.z + uz * push * shareMe));
+    cpu.x = Math.max(PLAYER_MIN_X, Math.min(PLAYER_MAX_X, cpu.x - ux * push * shareCpu));
+    cpu.z = Math.max(PLAYER_MIN_Z, Math.min(PLAYER_MAX_Z, cpu.z - uz * push * shareCpu));
+    bandDirty = true;
+  }
+
+  function moveToward(e, tx, tz, sp) {
+    const dx = tx - e.x, dz = tz - e.z;
+    const d = Math.hypot(dx, dz);
+    if (d < sp) { e.x = tx; e.z = tz; return true; }
+    e.x += dx / d * sp; e.z += dz / d * sp;
+    e.x = Math.max(PLAYER_MIN_X, Math.min(PLAYER_MAX_X, e.x));
+    e.z = Math.max(PLAYER_MIN_Z, Math.min(PLAYER_MAX_Z, e.z));
+    return false;
+  }
+
+  function cpuShoot() {
+    // 내가 타이밍 맞춰 뛰어 있으면 블락 판정
+    if (tryBlockNow()) { turnover("me", "BLOCK!", "#4ade80"); return; }
+
+    const d = hoopDist(cpu.x, cpu.z);
+    const three = isThreeAt(cpu.x, cpu.z);
+    const f = foe();
+
+    // 내가 가까이 붙어 있으면 성공률이 떨어진다
+    const guard = Math.hypot(player.x - cpu.x, player.z - cpu.z);
+    const contest = guard < 1.8 ? 1 - 0.40 * (1 - guard / 1.8) : 1;
+
+    if (d < DUNK_RANGE + 0.5) {                       // 덩크
+      cpu.dunking = true; cpu.timer = RISE_F;
+      cpu.shotWillMake = Math.random() * 100 < f.dunk * diff().aim * contest;
+      cpu.state = "dunk";
+      return;
+    }
+    const stat = three ? f.three_pt : f.two_pt;
+    const p = (stat / 100) * diff().aim * contest * (1 - Math.min(0.25, d * 0.02));
+    const make = Math.random() < p;
+    const b = findBand(d);
+    let speed;
+    if (b) speed = make ? (b.lo + b.hi) / 2 : b.hi + (b.hi - b.lo) * (0.8 + Math.random() * 0.6);
+    else speed = 0.17;
+    cpu.shotWillMake = make;
+    shooter = "cpu"; shotIsDunk = false;
+    shotValue = three ? 3 : 2;
+    cpu.armsUp = 1;
+    fireShot(cpu.x, cpu.z, speed);
+    cpu.state = "watch";
+  }
+
+  // 내가 블락 시도 — 점프 중 CPU 가 쏘면 판정
+  function tryBlockNow() {
+    if (defense.blockT < 6 || defense.blockT > 20) return false;
+    const d = Math.hypot(player.x - cpu.x, player.z - cpu.z);
+    if (d > 1.9) return false;
+    const m = me();
+    const reach = (m.block * 0.7 + m.jump * 0.3) / 100;
+    const p = reach * (1 - d / 1.9) * 1.15;
+    return Math.random() < p;
+  }
+
+  function trySteal(byMe) {
+    const a = byMe ? me() : foe();
+    const b = byMe ? foe() : me();
+    const d = Math.hypot(player.x - cpu.x, player.z - cpu.z);
+    const range = 1.4;
+    if (d > range) return false;
+    const p = (a.steal / 100) * (1 - b.power / 230) * (1 - d / range) * 0.95;
+    return Math.random() < p;
+  }
+
+  function turnover(to, msg, col) {
+    ball.live = false; dunk.active = false; cpu.dunking = false;
+    possession = to;
+    say(msg, col || "#60a5fa", 90);
+    doCheck();
+  }
+
+  // 리바운드: (점프 + 파워) 합 × 골대와의 거리로 겨룬다.
+  // 합을 그대로 쓰면 177 대 120 도 57% 밖에 안 벌어져서, 지수를 올려 차이를 키운다.
+  const REB_EXP = 2.2;
+  function rebound() {
+    const wMe = Math.pow(me().jump + me().power, REB_EXP)
+                * (1.6 - Math.min(1.2, distToRim() / 7));
+    const wCpu = Math.pow(foe().jump + foe().power, REB_EXP)
+                 * (1.6 - Math.min(1.2, hoopDist(cpu.x, cpu.z) / 7))
+                 * (0.8 + 0.4 * diff().aggr);
+    possession = Math.random() * (wMe + wCpu) < wMe ? "me" : "cpu";
+    say(possession === "me" ? "리바운드!" : "상대 리바운드", possession === "me" ? "#4ade80" : "#ff9a5c", 70);
+    doCheck();
+  }
+
+  function addScore(who, val) {
+    if (who === "me") myScore += val; else cpuScore += val;
+    if (myScore >= TARGET_SCORE || cpuScore >= TARGET_SCORE) {
+      vsOver = true; gameOver = true;
+      vsWinner = myScore >= TARGET_SCORE ? "me" : "cpu";
+      ball.live = false; dunk.active = false; cpu.dunking = false;
+      return true;
+    }
+    return false;
+  }
+
+  function vsStep() {
+    if (vsMsgTimer > 0) vsMsgTimer--;
+    if (vsOver) return;
+    if (checkT > 0) { checkT--; return; }
+    if (!dunk.active && !cpu.dunking) bodyCollide();   // 공중에 뜬 동안은 제외
+
+    // --- CPU 공격 ---
+    if (possession === "cpu") {
+      if (cpu.state === "drive") {
+        const reached = moveToward(cpu, cpu.targetX, cpu.targetZ, cpuSpeed());
+        cpu.dribPhase = (cpu.dribPhase + 1 / DRIB_PERIOD) % 1;
+        if (Math.abs(cpu.targetX - cpu.x) > 0.05) cpu.dribSide = cpu.targetX > cpu.x ? 1 : -1;
+        cpu.timer--;
+        if (reached && cpu.timer <= 0) cpuShoot();
+        else if (cpu.timer < -90) cpuShoot();        // 너무 끌면 그냥 쏜다
+      } else if (cpu.state === "dunk") {
+        cpu.timer--;
+        const p = 1 - Math.max(0, cpu.timer) / RISE_F;
+        cpu.lift = dunkApex(foe(), cpu.shotWillMake) * Math.sin(p * Math.PI / 2);
+        if (cpu.timer <= 0) {
+          shooter = "cpu"; shotIsDunk = true; shotValue = 2;
+          if (cpu.shotWillMake) { ball.dx = 0; ball.dz = 1; ball.p = 0.06; ball.y = RIM_H + BALL_R + 0.06;
+            ball.vp = -0.012; ball.vy = -0.08; }
+          else { ball.dx = 0; ball.dz = 1; ball.p = RIM_R + BALL_R * 0.5; ball.y = RIM_H + BALL_R * 1.2;
+            ball.vp = 0.028; ball.vy = -0.03; }
+          ball.rot = 0; ball.live = true; ball.scored = false;
+          settleTimer = 0; shotTimer = 0;
+          cpu.state = "watch";
+        }
+      } else if (cpu.state === "watch") {
+        cpu.lift *= 0.86; cpu.armsUp *= 0.92;
+      }
+
+      // 내 수비 액션
+      if (defense.stealT > 0) {
+        defense.stealT--;
+        if (defense.stealT === 10 && cpu.state === "drive") {
+          if (trySteal(true)) { turnover("me", "STEAL!", "#4ade80"); return; }
+        }
+      }
+      if (defense.blockT > 0) {
+        defense.blockT--;
+        defense.blockLift = 0.9 * Math.sin((1 - defense.blockT / 24) * Math.PI) * (me().jump / 100);
+      } else defense.blockLift = 0;
+
+    // --- 내 공격 ---
+    } else {
+      cpu.armsUp = 0; cpu.lift *= 0.86;
+      if (!ball.live && !dunk.active) {
+        // 수비 위치: 나와 골대 사이
+        const tx = player.x * 0.72, tz = HOOP_Z + (player.z - HOOP_Z) * 0.72;
+        moveToward(cpu, tx, tz, cpuSpeed() * 0.95);
+        cpu.state = "guard";
+        // CPU 스틸 시도
+        cpu.timer--;
+        if (cpu.timer <= 0) {
+          cpu.timer = Math.round(70 + Math.random() * 90 / Math.max(0.3, diff().aggr));
+          if (moving && trySteal(false)) { turnover("cpu", "스틸 당했다!", "#ff7a7a"); return; }
+        }
+      }
+    }
+  }
+
+  // 대결 모드에서 슛이 끝났을 때
+  function vsEndShot() {
+    const who = shooter;
+    if (ball.scored) {
+      say(shotIsDunk ? "DUNK! +2" : (shotValue === 3 ? "3점!" : "+2"),
+          who === "me" ? "#4ade80" : "#ff9a5c", 80);
+      if (addScore(who, shotIsDunk ? 2 : shotValue)) return;
+      possession = who;                 // 넣은 쪽이 계속 공격
+      doCheck();
+    } else {
+      rebound();
+    }
+  }
+
   // ===== 캐릭터 선택 화면 =====
   function cardBox(i) {
     const margin = 46, gap = 14;
     const cw = (W - margin * 2 - gap * 6) / 7;
-    return { x: margin + i * (cw + gap), y: 206, w: cw, h: 348 };
+    return { x: margin + i * (cw + gap), y: 176, w: cw, h: 428 };
   }
   function roundRect(x, y, w, h, r) {
     ctx.beginPath();
@@ -981,7 +1418,8 @@
     ctx.fillText(touchUI ? "카드를 누르면 선택 · 한 번 더 누르면 시작"
                          : "← → 로 고르고  Enter 로 시작", W / 2, 132);
 
-    const STATS = [["3점", "three_pt"], ["2점", "two_pt"], ["덩크", "dunk"], ["속도", "speed"]];
+    const STATS = [["3점", "three_pt"], ["2점", "two_pt"], ["덩크", "dunk"], ["속도", "speed"],
+                   ["파워", "power"], ["점프", "jump"], ["블락", "block"], ["스틸", "steal"]];
 
     for (let i = 0; i < PLAYER_KEYS.length; i++) {
       const p = PLAYERS[PLAYER_KEYS[i]];
@@ -1019,24 +1457,28 @@
 
       // 이름
       ctx.fillStyle = on ? "#ffffff" : "rgba(255,255,255,.75)";
-      ctx.font = "bold 15px sans-serif";
-      ctx.fillText(p.name, b.x + b.w / 2, b.y + 174);
+      ctx.font = "bold 14px sans-serif";
+      ctx.fillText(p.name, b.x + b.w / 2, b.y + 166);
 
-      // 능력치 4개
-      const barW = b.w - 34;
+      // 능력치 8개 (공격 4 + 수비·신체 4)
+      const barW = b.w - 30;
       for (let k = 0; k < STATS.length; k++) {
         const v = p[STATS[k][1]];
-        const yy = b.y + 202 + k * 34;
+        const yy = b.y + 190 + k * 29;
+        if (k === 4) {                       // 공격 / 수비 구분선
+          ctx.strokeStyle = "rgba(255,255,255,.12)"; ctx.lineWidth = 1;
+          ctx.beginPath(); ctx.moveTo(b.x + 15, yy - 15); ctx.lineTo(b.x + b.w - 15, yy - 15); ctx.stroke();
+        }
         ctx.textAlign = "left";
-        ctx.fillStyle = "rgba(255,255,255,.5)"; ctx.font = "12px sans-serif";
-        ctx.fillText(STATS[k][0], b.x + 17, yy - 4);
+        ctx.fillStyle = "rgba(255,255,255,.5)"; ctx.font = "11px sans-serif";
+        ctx.fillText(STATS[k][0], b.x + 15, yy - 3);
         ctx.textAlign = "right";
-        ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.font = "bold 12px sans-serif";
-        ctx.fillText(String(v), b.x + b.w - 17, yy - 4);
+        ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.font = "bold 11px sans-serif";
+        ctx.fillText(String(v), b.x + b.w - 15, yy - 3);
         ctx.fillStyle = "rgba(255,255,255,.12)";
-        ctx.fillRect(b.x + 17, yy, barW, 7);
+        ctx.fillRect(b.x + 15, yy, barW, 6);
         ctx.fillStyle = v >= 90 ? "#4ade80" : (v >= 70 ? "#f3c542" : "#e06c5a");
-        ctx.fillRect(b.x + 17, yy, barW * v / 100, 7);
+        ctx.fillRect(b.x + 15, yy, barW * v / 100, 6);
         ctx.textAlign = "center";
       }
     }
@@ -1052,7 +1494,67 @@
     const rest = PLAYER_KEYS.filter((k) => k !== myKey);
     rivalKey = rest[Math.floor(Math.random() * rest.length)];
     scene = "play";
-    reset();
+    if (vsMode) { gameOver = false; vsReset(true); }
+    else reset();
+  }
+
+  // ===== 모드 / 난이도 선택 화면 =====
+  function modeBox(i) {
+    const w = Math.min(560, W * 0.45), h = 150;
+    return { x: (W - w) / 2, y: 190 + i * 178, w: w, h: h };
+  }
+  function diffBox(i) {
+    const b = modeBox(1), w = (b.w - 24) / 3;
+    return { x: b.x + i * (w + 12), y: b.y + b.h + 16, w: w, h: 52 };
+  }
+
+  function drawMode() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#1a1f2b"); g.addColorStop(1, "#0e1116");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#e9ecf1"; ctx.font = "bold 46px sans-serif";
+    ctx.fillText("🏀  모드를 고르세요", W / 2, 110);
+    ctx.fillStyle = "rgba(255,255,255,.4)"; ctx.font = "16px sans-serif";
+    ctx.fillText(touchUI ? "눌러서 선택 · 한 번 더 누르면 시작" : "↑ ↓ 모드   ← → 난이도   Enter 시작", W / 2, 146);
+
+    const titles = ["혼자 슛 연습", "CPU 대결 (21점 선취)"];
+    const descs = ["10구 던져서 점수 내기", "1대1 · 수비 · 블락 · 스틸"];
+    for (let i = 0; i < 2; i++) {
+      const b = modeBox(i), on = modePick === i;
+      ctx.fillStyle = on ? "rgba(255,255,255,.10)" : "rgba(255,255,255,.04)";
+      roundRect(b.x, b.y, b.w, b.h, 16); ctx.fill();
+      ctx.strokeStyle = on ? "#f3c542" : "rgba(255,255,255,.12)";
+      ctx.lineWidth = on ? 4 : 1.5;
+      roundRect(b.x, b.y, b.w, b.h, 16); ctx.stroke();
+      ctx.fillStyle = on ? "#ffffff" : "rgba(255,255,255,.7)";
+      ctx.font = "bold 30px sans-serif";
+      ctx.fillText(titles[i], W / 2, b.y + 58);
+      ctx.fillStyle = "rgba(255,255,255,.45)"; ctx.font = "17px sans-serif";
+      ctx.fillText(descs[i], W / 2, b.y + 94);
+    }
+
+    // 난이도 (대결 모드일 때만)
+    if (modePick === 1) {
+      ctx.fillStyle = "rgba(255,255,255,.45)"; ctx.font = "15px sans-serif";
+      const b0 = diffBox(0);
+      ctx.textAlign = "left";
+      ctx.fillText("난이도", b0.x, b0.y - 10);
+      ctx.textAlign = "center";
+      for (let i = 0; i < 3; i++) {
+        const b = diffBox(i), on = diffPick === i;
+        ctx.fillStyle = on ? "rgba(243,197,66,.22)" : "rgba(255,255,255,.05)";
+        roundRect(b.x, b.y, b.w, b.h, 10); ctx.fill();
+        ctx.strokeStyle = on ? "#f3c542" : "rgba(255,255,255,.12)";
+        ctx.lineWidth = on ? 3 : 1.5;
+        roundRect(b.x, b.y, b.w, b.h, 10); ctx.stroke();
+        ctx.fillStyle = on ? "#ffffff" : "rgba(255,255,255,.6)";
+        ctx.font = "bold 20px sans-serif";
+        ctx.fillText(DIFFS[i].name, b.x + b.w / 2, b.y + 34);
+      }
+    }
+    ctx.textAlign = "left";
   }
 
   // 상대 선수의 10구를 능력치로 시뮬레이션 (간단 모델)
@@ -1140,9 +1642,22 @@
     ctx.lineWidth = 3;
     ctx.beginPath(); ctx.arc(s.x, s.y, 92, 0, Math.PI * 2); ctx.stroke();
 
+    const defMode = vsMode && possession === "cpu" && !vsOver;
     ctx.fillStyle = "#e9ecf1";
     ctx.font = "bold 26px sans-serif"; ctx.textAlign = "center";
-    ctx.fillText(dunkMode ? "덩크" : "슛", s.x, s.y + 9);
+    ctx.fillText(defMode ? "블락" : (dunkMode ? "덩크" : "슛"), s.x, s.y + 9);
+
+    // 수비 중에만 뜨는 스틸 버튼
+    if (defMode) {
+      const sb = stealHome();
+      const hot = defense.stealT > 0;
+      ctx.fillStyle = hot ? "rgba(96,165,250,.5)" : "rgba(96,165,250,.22)";
+      ctx.beginPath(); ctx.arc(sb.x, sb.y, 66, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "rgba(96,165,250,.8)"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.arc(sb.x, sb.y, 66, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = "#e9ecf1"; ctx.font = "bold 21px sans-serif";
+      ctx.fillText("스틸", sb.x, sb.y + 8);
+    }
     ctx.textAlign = "left";
   }
 
@@ -1161,12 +1676,28 @@
   }
 
   function draw() {
+    if (scene === "mode") { drawMode(); drawRotateNotice(); return; }
     if (scene === "select") { drawSelect(); drawRotateNotice(); return; }
     drawCourt();
-    // 림보다 뒤(= z가 작은 쪽)면 선수를 먼저, 아니면 골대를 먼저 그린다
-    const pz = dunk.active ? dunk.z : player.z;
-    if (pz < HOOP_Z) { drawPlayer(); drawHoop(); }
-    else { drawHoop(); drawPlayer(); }
+
+    // 먼 선수부터 그린다 (z 가 작을수록 멀다)
+    const myState = {
+      x: dunk.active ? dunk.x : player.x, z: dunk.active ? dunk.z : player.z,
+      lift: (dunk.active ? dunk.lift : 0) + (vsMode ? defense.blockLift : 0),
+      hang: dunk.active ? dunk.hang : 0, dunkMode: dunk.active,
+      armsUp: Math.max(armsUp, vsMode && defense.blockT > 0 ? 1 : 0),
+      dribbling: dribbling, dribPhase: dribPhase, dribSide: dribSide, data: me()
+    };
+    const figs = vsMode ? [myState, cpuState()] : [myState];
+    figs.sort((a, b) => a.z - b.z);
+
+    let drewHoop = false;
+    for (const f of figs) {
+      if (!drewHoop && f.z >= HOOP_Z) { drawHoop(); drewHoop = true; }
+      drawPlayer(f);
+    }
+    if (!drewHoop) drawHoop();
+
     drawBall();
     ctx.fillStyle = "#0f1115";
     ctx.fillRect(0, PANEL_Y, W, H - PANEL_Y);
