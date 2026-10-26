@@ -50,6 +50,32 @@
   const KEY_W = 4.9, FT_Z = 5.8, FT_R = 1.8, RESTRICT_R = 1.25;
   const BALL_R = 0.1195;
 
+  // ===== 선수 데이터 =====
+  // three_pt / two_pt / dunk / speed 는 0~100
+  const PLAYERS = {
+    jordan: { name: "마이클 조던",      number: 23, three_pt: 75,  two_pt: 97, dunk: 95, speed: 95,
+              uniform: "#c8102e", hair: null,      bald: true,  shoe: "#15161a", shoeAccent: "#e03131" },
+    lebron: { name: "르브론 제임스",    number: 23, three_pt: 80,  two_pt: 95, dunk: 97, speed: 90,
+              uniform: "#552583", hair: "#1a1a1a", bald: false, shoe: "#552583", shoeAccent: "#fdb927" },
+    kobe:   { name: "코비 브라이언트",  number: 24, three_pt: 82,  two_pt: 96, dunk: 90, speed: 88,
+              uniform: "#f3c542", hair: "#1a1a1a", bald: false, shoe: "#15161a", shoeAccent: "#8a4fd0" },
+    curry:  { name: "스테픈 커리",      number: 30, three_pt: 100, two_pt: 85, dunk: 55, speed: 85,
+              uniform: "#1d428a", hair: "#6b4423", bald: false, shoe: "#2b63c9", shoeAccent: "#ffd93d" },
+    magic:  { name: "매직 존슨",        number: 32, three_pt: 60,  two_pt: 88, dunk: 70, speed: 80,
+              uniform: "#ffd93d", hair: "#1a1a1a", bald: false, shoe: "#f2f4f8", shoeAccent: "#8a4fd0" },
+    bird:   { name: "래리 버드",        number: 33, three_pt: 92,  two_pt: 94, dunk: 50, speed: 65,
+              uniform: "#007a33", hair: "#d9b45b", bald: false, shoe: "#f2f4f8", shoeAccent: "#2aa84a" },
+    kareem: { name: "카림 압둘-자바",   number: 33, three_pt: 20,  two_pt: 98, dunk: 88, speed: 55,
+              uniform: "#552583", hair: null,      bald: true,  shoe: "#f2f4f8", shoeAccent: "#15161a" }
+  };
+  const PLAYER_KEYS = ["jordan", "lebron", "kobe", "curry", "magic", "bird", "kareem"];
+
+  let scene = "select";                 // "select" → "play"
+  let myKey = "jordan", rivalKey = "lebron";
+  let pick = 0;                         // 선택 화면 커서
+  let rivalScore = 0;
+  const me = () => PLAYERS[myKey];
+
   // ===== 카메라 (하프코트 전체가 들어오는 방송 중계 앵글) =====
   // 베이스라인(z=0)이 화면 y=250·반폭 330px, 코트 앞단(z=10)이 y=600·반폭 580px 이 되도록 역산
   const CAM_Z = 23.2, CAM_Y = 10.5, FOCAL = 1020.8, HORIZON = -212;
@@ -98,7 +124,9 @@
   const REACH = 2.30;                    // 스탠딩 리치
   const PLAYER_MIN_X = -7, PLAYER_MAX_X = 7;
   const PLAYER_MIN_Z = 0.5, PLAYER_MAX_Z = 9.5;
-  const MOVE_SPEED = 4.2 / 60;           // 초당 4.2m
+  const BASE_MOVE_SPEED = 4.2 / 60;      // speed 100 기준 초당 4.2m
+  // speed 100 = 기본 속도, 50 = 그 절반
+  const moveSpeed = () => BASE_MOVE_SPEED * (me().speed / 100);
   const DUNK_RANGE = 1.7;
   const DUNK_SPOT = { x: 0, z: HOOP_Z + RIM_R };   // 림 앞쪽 가장자리 바로 아래
   const GRAB_H = RIM_H - REACH;          // 림을 잡으려면 필요한 점프 높이
@@ -117,8 +145,13 @@
   const BAND_CENTER = 0.55;              // 성공 구간 중심이 놓일 게이지 위치
   const SPEED_LO = 0.05, SPEED_HI = 0.36; // 탐색 범위 (m/frame)
 
-  // 거리가 멀수록 성공 구간을 살짝 좁힌다 (3점의 가치 유지)
-  const bandFrac = (d) => Math.max(0.17, Math.min(0.34, 0.34 - 0.014 * d));
+  // 성공 구간 폭 = 거리(멀수록 좁음) × 능력치(높을수록 넓음)
+  // 3점 라인 밖이면 three_pt, 안이면 two_pt 를 쓴다
+  function bandFrac(d, three) {
+    const base = Math.max(0.17, Math.min(0.34, 0.34 - 0.014 * d));
+    const stat = three ? me().three_pt : me().two_pt;
+    return Math.max(0.09, Math.min(0.45, base * (0.40 + 0.009 * stat)));
+  }
 
   const RISE_F = 22, DROP_F = 26, HANG_MAX = 150, HANG_AFTER_SCORE = 26;
 
@@ -236,7 +269,7 @@
     const D = distToRim();
     const b = findBand(D);
     if (!b) { gauge = null; return; }
-    const frac = bandFrac(D);
+    const frac = bandFrac(D, isThree());
     const mid = (b.lo + b.hi) / 2;
     const span = (b.hi - b.lo) / frac;
     const lo = mid - span * BAND_CENTER;
@@ -263,7 +296,7 @@
 
   // 키보드와 터치가 같은 함수를 쓴다
   function pressShoot() {
-    if (gameOver) { reset(); return; }
+    if (gameOver) { scene = "select"; return; }   // 끝나면 선수 선택으로 돌아간다
     if (busy()) return;
     if (inDunkRange()) { launch(null); return; }   // 덩크는 누르는 즉시
     if (!gauge) return;
@@ -277,6 +310,14 @@
   }
 
   window.addEventListener("keydown", (e) => {
+    // 선택 화면
+    if (scene === "select") {
+      const mk = keyOf(e);
+      if (mk === "L") { e.preventDefault(); pick = (pick + PLAYER_KEYS.length - 1) % PLAYER_KEYS.length; return; }
+      if (mk === "R") { e.preventDefault(); pick = (pick + 1) % PLAYER_KEYS.length; return; }
+      if (isSpace(e) || e.key === "Enter") { e.preventDefault(); confirmPick(); }
+      return;
+    }
     const mk = keyOf(e);
     if (mk) { e.preventDefault(); if (!busy() && !gameOver) keys[mk] = true; return; }
     if (!isSpace(e)) return;
@@ -314,7 +355,19 @@
     e.preventDefault();
     const p = canvasPt(e);
 
-    if (gameOver) { reset(); return; }
+    // 선택 화면: 카드를 누르면 선택, 고른 카드를 한 번 더 누르면 시작
+    if (scene === "select") {
+      for (let i = 0; i < PLAYER_KEYS.length; i++) {
+        const b = cardBox(i);
+        if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
+          if (pick === i) confirmPick(); else pick = i;
+          return;
+        }
+      }
+      return;
+    }
+
+    if (gameOver) { scene = "select"; return; }
 
     if (p.x > W / 2) {                       // 오른쪽 절반 = 슛 / 덩크
       if (shootId === null) { shootId = e.pointerId; pressShoot(); }
@@ -356,6 +409,7 @@
       dunk.fromX = player.x; dunk.fromZ = player.z;
       dunk.x = player.x; dunk.z = player.z;
       dunk.lift = 0; dunk.hang = 0; dunk.released = false; dunk.afterScore = 0;
+      dunk.success = Math.random() * 100 < me().dunk;   // 덩크 능력치 = 성공 확률
       player.x = DUNK_SPOT.x; player.z = DUNK_SPOT.z;
       bandDirty = true;
       ball.live = false; ball.scored = false;
@@ -384,16 +438,24 @@
   function slam() {
     dunk.released = true;
     ball.dx = 0; ball.dz = 1;
-    ball.p = 0.06; ball.y = RIM_H + BALL_R + 0.06;
-    ball.vp = -0.012; ball.vy = -0.08;
     ball.rot = 0; ball.live = true; ball.scored = false;
     settleTimer = 0; shotTimer = 0;
-    message = "DUNK!"; messageColor = "#4ade80"; messageTimer = 110;
+
+    if (dunk.success) {
+      ball.p = 0.06; ball.y = RIM_H + BALL_R + 0.06;
+      ball.vp = -0.012; ball.vy = -0.08;
+      message = "DUNK!"; messageColor = "#4ade80"; messageTimer = 110;
+    } else {
+      // 림에 튕겨 나온다
+      ball.p = RIM_R + BALL_R * 0.5; ball.y = RIM_H + BALL_R * 1.2;
+      ball.vp = 0.028; ball.vy = -0.03;
+    }
   }
 
   function reset() {
     shots = 0; score = 0; makes = 0; gameOver = false;
     message = ""; messageTimer = 0; rimFlash = 0; lastPower = null;
+    rivalScore = simulateRival();
     player.x = 0; player.z = FT_Z;
     dunk.active = false; dunk.lift = 0; dunk.hang = 0;
     bandDirty = true;
@@ -409,7 +471,9 @@
   function endShot() {
     if (ball.scored) {
       makes++; score += shotValue;
-    } else if (!shotIsDunk && gauge) {
+    } else if (shotIsDunk) {
+      message = "덩크 실패!"; messageColor = "#ff9a5c"; messageTimer = 75;
+    } else if (gauge) {
       const mid = (gauge.bandLo + gauge.bandHi) / 2;
       const diff = lastPower - mid;
       message = (Math.abs(diff) < 14 ? "아깝다! 조금 " : "너무 ") + (diff < 0 ? "약해요" : "강해요");
@@ -432,7 +496,8 @@
       dunk.lift = (GRAB_H + 0.12) * Math.sin(p * Math.PI / 2);
       if (dunk.t >= RISE_F) {
         slam();
-        dunk.phase = "hang"; dunk.dropFrom = dunk.lift; dunk.t = 0;
+        dunk.phase = dunk.success ? "hang" : "drop";   // 실패하면 매달리지 않는다
+        dunk.dropFrom = dunk.lift; dunk.t = 0;
       }
       return;
     }
@@ -460,7 +525,7 @@
       let mz = joy.active ? joy.z : (keys.D ? 1 : 0) - (keys.U ? 1 : 0);
       const mag = Math.hypot(mx, mz);
       if (mag > 0.02) {
-        const sp = MOVE_SPEED * Math.min(1, mag);
+        const sp = moveSpeed() * Math.min(1, mag);
         const ux = mx / mag, uz = mz / mag;
         player.x = Math.max(PLAYER_MIN_X, Math.min(PLAYER_MAX_X, player.x + ux * sp));
         player.z = Math.max(PLAYER_MIN_Z, Math.min(PLAYER_MAX_Z, player.z + uz * sp));
@@ -504,6 +569,15 @@
   const mix = (a, b, t) => "rgb(" + Math.round(a[0] + (b[0] - a[0]) * t) + "," +
     Math.round(a[1] + (b[1] - a[1]) * t) + "," + Math.round(a[2] + (b[2] - a[2]) * t) + ")";
   const lerpPt = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+
+  // "#rrggbb" 를 밝기 k 배로
+  function shade(hex, k) {
+    const n = parseInt(hex.slice(1), 16);
+    const r = Math.min(255, Math.round((n >> 16 & 255) * k));
+    const g = Math.min(255, Math.round((n >> 8 & 255) * k));
+    const b = Math.min(255, Math.round((n & 255) * k));
+    return "rgb(" + r + "," + g + "," + b + ")";
+  }
 
   function pathPts(pts, close) {
     ctx.beginPath();
@@ -664,19 +738,37 @@
     const kneeR = P(0.17, hipY - (dunk.active ? 0.40 - 0.04 * hang : 0.34));
     const footL = P(-0.19, footY), footR = P(0.19, footY);
 
+    // 선수별 색
+    const P0 = me();
+    const UNI = P0.uniform, UNI_DK = shade(UNI, 0.78);
+
     // 다리
     limb([hipL, kneeL, footL], 0.1, SKIN);
     limb([hipR, kneeR, footR], 0.1, SKIN);
-    ctx.strokeStyle = "#f2f4f8"; ctx.lineWidth = lw(0.09);
-    ctx.beginPath(); ctx.moveTo(footL.x - s * 0.05, footL.y); ctx.lineTo(footL.x + s * 0.05, footL.y); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(footR.x - s * 0.05, footR.y); ctx.lineTo(footR.x + s * 0.05, footR.y); ctx.stroke();
+
+    // 운동화 (기본색 + 포인트)
+    [footL, footR].forEach((f) => {
+      ctx.strokeStyle = P0.shoe; ctx.lineWidth = lw(0.095);
+      ctx.beginPath(); ctx.moveTo(f.x - s * 0.055, f.y); ctx.lineTo(f.x + s * 0.055, f.y); ctx.stroke();
+      ctx.strokeStyle = P0.shoeAccent; ctx.lineWidth = Math.max(1, lw(0.035));
+      ctx.beginPath(); ctx.moveTo(f.x - s * 0.05, f.y + s * 0.04); ctx.lineTo(f.x + s * 0.05, f.y + s * 0.04); ctx.stroke();
+    });
 
     // 반바지 + 몸통
-    limb([hipL, hipR], 0.26, JERSEY_DK);
-    limb([P(-0.1, hipY), P(-0.14, hipY - 0.26)], 0.17, JERSEY_DK);
-    limb([P(0.1, hipY), P(0.14, hipY - 0.26)], 0.17, JERSEY_DK);
-    limb([P(0, hipY), P(0, shoY)], 0.40, JERSEY);
-    limb([shoL, shoR], 0.30, JERSEY);
+    limb([hipL, hipR], 0.26, UNI_DK);
+    limb([P(-0.1, hipY), P(-0.14, hipY - 0.26)], 0.17, UNI_DK);
+    limb([P(0.1, hipY), P(0.14, hipY - 0.26)], 0.17, UNI_DK);
+    limb([P(0, hipY), P(0, shoY)], 0.40, UNI);
+    limb([shoL, shoR], 0.30, UNI);
+
+    // 유니폼 등번호
+    const numP = P(0, hipY + 0.34);
+    const fs = Math.max(7, s * 0.26);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "bold " + fs.toFixed(0) + "px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(String(P0.number), numP.x, numP.y + fs * 0.35);
+    ctx.textAlign = "left";
 
     // 팔
     if (dunk.active) {
@@ -706,12 +798,14 @@
       limb([shoR, lerpPt(downER, upER, u), lerpPt(downHR, upHR, u)], 0.095, SKIN);
     }
 
-    // 목 + 머리 (뒷모습이라 뒤통수)
+    // 목 + 머리 (뒷모습이라 뒤통수). 대머리면 머리카락을 그리지 않는다
     limb([P(0, shoY), P(0, headY - 0.09)], 0.08, SKIN);
     ctx.fillStyle = SKIN;
     ctx.beginPath(); ctx.arc(hd.x, hd.y, headR, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = "#241a14";
-    ctx.beginPath(); ctx.arc(hd.x, hd.y - headR * 0.12, headR * 0.96, 0, Math.PI * 2); ctx.fill();
+    if (!P0.bald && P0.hair) {
+      ctx.fillStyle = P0.hair;
+      ctx.beginPath(); ctx.arc(hd.x, hd.y - headR * 0.12, headR * 0.96, 0, Math.PI * 2); ctx.fill();
+    }
 
     ctx.lineCap = "butt"; ctx.lineJoin = "miter";
   }
@@ -801,6 +895,15 @@
     ctx.fillStyle = "#e9ecf1"; ctx.font = "bold 30px sans-serif"; ctx.textAlign = "left";
     ctx.fillText("SCORE  " + score, 28, 46);
 
+    // 내 선수 / 상대 선수
+    const mp = me(), rp = PLAYERS[rivalKey];
+    ctx.textAlign = "right";
+    ctx.font = "bold 17px sans-serif"; ctx.fillStyle = mp.uniform;
+    ctx.fillText("#" + mp.number + " " + mp.name, W - 28, 40);
+    ctx.font = "14px sans-serif"; ctx.fillStyle = "rgba(255,255,255,.4)";
+    ctx.fillText("VS  #" + rp.number + " " + rp.name, W - 28, 64);
+    ctx.textAlign = "left";
+
     ctx.font = "17px sans-serif"; ctx.fillStyle = "#9aa3b2";
     ctx.fillText("남은 슛  " + Math.max(0, TOTAL_SHOTS - shots) + " / " + TOTAL_SHOTS +
                  "   ·   성공  " + makes, 28, 74);
@@ -834,17 +937,135 @@
     ctx.fillStyle = "#9aa3b2"; ctx.font = "19px sans-serif";
     ctx.fillText(TOTAL_SHOTS + "번 중 " + makes + "번 성공 (" +
                  Math.round(makes / TOTAL_SHOTS * 100) + "%)", W / 2, H / 2 + 10);
-    let grade = "다시 도전!";
-    if (score >= 24) grade = "레전드 🏆";
-    else if (score >= 18) grade = "에이스 🔥";
-    else if (score >= 12) grade = "준수함 👍";
-    else if (score >= 6) grade = "연습이 필요해요";
-    ctx.fillStyle = "#ffb84d"; ctx.font = "bold 26px sans-serif";
-    ctx.fillText(grade, W / 2, H / 2 + 52);
+    // 상대 선수와 비교
+    const rp = PLAYERS[rivalKey];
+    const win = score > rivalScore, tie = score === rivalScore;
+    ctx.fillStyle = "rgba(255,255,255,.55)"; ctx.font = "17px sans-serif";
+    ctx.fillText("상대  #" + rp.number + " " + rp.name + "  —  " + rivalScore + " 점",
+                 W / 2, H / 2 + 48);
+    ctx.font = "bold 32px sans-serif";
+    ctx.fillStyle = win ? "#4ade80" : (tie ? "#f3c542" : "#ff7a7a");
+    ctx.fillText(win ? "WIN 🏆" : (tie ? "DRAW" : "LOSE"), W / 2, H / 2 + 92);
+
     ctx.fillStyle = "rgba(255,255,255,.6)"; ctx.font = "17px sans-serif";
-    ctx.fillText(touchUI ? "화면을 누르면 다시 시작합니다"
-                         : "SPACE 를 누르면 다시 시작합니다", W / 2, H / 2 + 104);
+    ctx.fillText(touchUI ? "화면을 누르면 선수 선택으로"
+                         : "SPACE 를 누르면 선수 선택으로", W / 2, H / 2 + 134);
     ctx.textAlign = "left";
+  }
+
+  // ===== 캐릭터 선택 화면 =====
+  function cardBox(i) {
+    const margin = 46, gap = 14;
+    const cw = (W - margin * 2 - gap * 6) / 7;
+    return { x: margin + i * (cw + gap), y: 206, w: cw, h: 348 };
+  }
+  function roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function drawSelect() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#1a1f2b"); g.addColorStop(1, "#0e1116");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#e9ecf1"; ctx.font = "bold 42px sans-serif";
+    ctx.fillText("선수를 고르세요", W / 2, 96);
+    ctx.fillStyle = "rgba(255,255,255,.45)"; ctx.font = "17px sans-serif";
+    ctx.fillText(touchUI ? "카드를 누르면 선택 · 한 번 더 누르면 시작"
+                         : "← → 로 고르고  Enter 로 시작", W / 2, 132);
+
+    const STATS = [["3점", "three_pt"], ["2점", "two_pt"], ["덩크", "dunk"], ["속도", "speed"]];
+
+    for (let i = 0; i < PLAYER_KEYS.length; i++) {
+      const p = PLAYERS[PLAYER_KEYS[i]];
+      const b = cardBox(i);
+      const on = i === pick;
+
+      ctx.fillStyle = on ? "rgba(255,255,255,.10)" : "rgba(255,255,255,.045)";
+      roundRect(b.x, b.y, b.w, b.h, 14); ctx.fill();
+      ctx.strokeStyle = on ? p.uniform : "rgba(255,255,255,.12)";
+      ctx.lineWidth = on ? 4 : 1.5;
+      roundRect(b.x, b.y, b.w, b.h, 14); ctx.stroke();
+
+      // 유니폼 + 등번호
+      const bw = b.w * 0.56, bh = 74;
+      const bx = b.x + (b.w - bw) / 2, by = b.y + 46;
+      ctx.fillStyle = p.uniform;
+      roundRect(bx, by, bw, bh, 8); ctx.fill();
+      ctx.fillStyle = "#ffffff"; ctx.font = "bold 34px sans-serif";
+      ctx.fillText(String(p.number), b.x + b.w / 2, by + bh / 2 + 12);
+
+      // 머리 (대머리면 피부색만)
+      ctx.fillStyle = SKIN;
+      ctx.beginPath(); ctx.arc(b.x + b.w / 2, by - 16, 19, 0, Math.PI * 2); ctx.fill();
+      if (!p.bald && p.hair) {
+        ctx.fillStyle = p.hair;
+        ctx.beginPath(); ctx.arc(b.x + b.w / 2, by - 19, 18, 0, Math.PI * 2); ctx.fill();
+      }
+      // 운동화
+      ctx.fillStyle = p.shoe;
+      roundRect(b.x + b.w / 2 - 26, by + bh + 8, 22, 9, 4); ctx.fill();
+      roundRect(b.x + b.w / 2 + 4, by + bh + 8, 22, 9, 4); ctx.fill();
+      ctx.fillStyle = p.shoeAccent;
+      ctx.fillRect(b.x + b.w / 2 - 26, by + bh + 15, 22, 3);
+      ctx.fillRect(b.x + b.w / 2 + 4, by + bh + 15, 22, 3);
+
+      // 이름
+      ctx.fillStyle = on ? "#ffffff" : "rgba(255,255,255,.75)";
+      ctx.font = "bold 15px sans-serif";
+      ctx.fillText(p.name, b.x + b.w / 2, b.y + 174);
+
+      // 능력치 4개
+      const barW = b.w - 34;
+      for (let k = 0; k < STATS.length; k++) {
+        const v = p[STATS[k][1]];
+        const yy = b.y + 202 + k * 34;
+        ctx.textAlign = "left";
+        ctx.fillStyle = "rgba(255,255,255,.5)"; ctx.font = "12px sans-serif";
+        ctx.fillText(STATS[k][0], b.x + 17, yy - 4);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "rgba(255,255,255,.85)"; ctx.font = "bold 12px sans-serif";
+        ctx.fillText(String(v), b.x + b.w - 17, yy - 4);
+        ctx.fillStyle = "rgba(255,255,255,.12)";
+        ctx.fillRect(b.x + 17, yy, barW, 7);
+        ctx.fillStyle = v >= 90 ? "#4ade80" : (v >= 70 ? "#f3c542" : "#e06c5a");
+        ctx.fillRect(b.x + 17, yy, barW * v / 100, 7);
+        ctx.textAlign = "center";
+      }
+    }
+
+    // 상대 선수 안내
+    ctx.fillStyle = "rgba(255,255,255,.4)"; ctx.font = "16px sans-serif";
+    ctx.fillText("상대 선수는 남은 선수 중에서 자동 배정됩니다", W / 2, H - 52);
+    ctx.textAlign = "left";
+  }
+
+  function confirmPick() {
+    myKey = PLAYER_KEYS[pick];
+    const rest = PLAYER_KEYS.filter((k) => k !== myKey);
+    rivalKey = rest[Math.floor(Math.random() * rest.length)];
+    scene = "play";
+    reset();
+  }
+
+  // 상대 선수의 10구를 능력치로 시뮬레이션 (간단 모델)
+  function simulateRival() {
+    const p = PLAYERS[rivalKey];
+    let pts = 0;
+    for (let i = 0; i < TOTAL_SHOTS; i++) {
+      const r = Math.random();
+      if (r < 0.15) { if (Math.random() * 100 < p.dunk) pts += 2; }
+      else if (r < 0.60) { if (Math.random() * 100 < p.two_pt * 0.75) pts += 2; }
+      else { if (Math.random() * 100 < p.three_pt * 0.70) pts += 3; }
+    }
+    return pts;
   }
 
   function tickTimers() {
@@ -940,6 +1161,7 @@
   }
 
   function draw() {
+    if (scene === "select") { drawSelect(); drawRotateNotice(); return; }
     drawCourt();
     // 림보다 뒤(= z가 작은 쪽)면 선수를 먼저, 아니면 골대를 먼저 그린다
     const pz = dunk.active ? dunk.z : player.z;
@@ -960,7 +1182,7 @@
     if (!last) last = now;
     acc += Math.min(now - last, 200);
     last = now;
-    while (acc >= STEP_MS) { step(); tickTimers(); acc -= STEP_MS; }
+    while (acc >= STEP_MS) { if (scene === "play") { step(); tickTimers(); } acc -= STEP_MS; }
     draw();
     requestAnimationFrame(loop);
   }
